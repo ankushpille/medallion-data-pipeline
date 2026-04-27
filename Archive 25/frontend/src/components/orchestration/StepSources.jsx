@@ -11,7 +11,7 @@ export default function StepSources({
   selectedEndpoint, setSelectedEndpoint,
   setSourceType, setFolderPath,
   setShowUploadModal, openExplorer, onNext, call,
-  refreshTrigger
+  refreshTrigger, intelligenceData
 }) {
   const navigate = useNavigate();
   const [localFiles, setLocalFiles] = useState([]);
@@ -62,6 +62,16 @@ export default function StepSources({
   }
 
   const [activeTab, setActiveTab] = useState('LOCAL');
+
+  useEffect(() => {
+    if (intelligenceData?.ingestion_support) {
+      if (intelligenceData.ingestion_support.api) {
+        setActiveTab('API');
+      } else if (intelligenceData.ingestion_support.file_based) {
+        setActiveTab('S3'); // Default to cloud storage
+      }
+    }
+  }, [intelligenceData]);
 
   const sourceTabs = [
     { id: 'LOCAL', label: 'Local Files', icon: <FiFolder />, color: '#10b981' },
@@ -126,6 +136,19 @@ export default function StepSources({
           <img src={logo} alt="Agilisium" style={{ height: 28, objectFit: 'contain' }} />
         </div>
       </div>
+
+      {intelligenceData && (
+        <div style={{ marginBottom: 20, padding: 12, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, color: '#047857' }}>
+          <FiZap size={20} />
+          <div style={{ fontSize: 13, fontWeight: 500 }}>
+            <strong>Auto-detected capabilities:</strong> The intelligent scan detected 
+            {intelligenceData.ingestion_support?.api ? ' API' : ''}
+            {intelligenceData.ingestion_support?.file_based ? ' File-based' : ''}
+            {intelligenceData.ingestion_support?.database ? ' Database' : ''} 
+            ingestion. Supported formats: {intelligenceData.file_types?.join(', ') || 'Unknown'}.
+          </div>
+        </div>
+      )}
 
       <div className="step-body">
         <div className="tab-content" style={{ minHeight: 300 }}>

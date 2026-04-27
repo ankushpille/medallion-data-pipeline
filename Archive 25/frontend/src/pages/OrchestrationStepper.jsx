@@ -11,16 +11,18 @@ import StepSources from '../components/orchestration/StepSources';
 import StepConfig from '../components/orchestration/StepConfig';
 import StepDQ from '../components/orchestration/StepDQ';
 import StepProgress from '../components/orchestration/StepProgress';
+import PipelineIntelligence from '../components/PipelineIntelligence';
 import HistoryView from './HistoryView';
 import './orchestration.css';
 import logo from "../assets/images/image.png"
 
 const STEPS = [
   { num: 1, label: 'Client' },
-  { num: 2, label: 'Data Sources' },
-  { num: 3, label: 'Configuration' },
-  { num: 4, label: 'DQ Rules' },
-  { num: 5, label: 'Execution' },
+  { num: 2, label: 'Intelligence' },
+  { num: 3, label: 'Data Sources' },
+  { num: 4, label: 'Configuration' },
+  { num: 5, label: 'Review & Confirm' },
+  { num: 6, label: 'Execution' },
 ];
 
 export default function OrchestrationStepper({ hideHeader = false }) {
@@ -59,6 +61,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [isSuggesting, setIsSuggesting] = useState(false);
   const [localRefreshTrigger, setLocalRefreshTrigger] = useState(0);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
+  const [intelligenceData, setIntelligenceData] = useState(null);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
@@ -207,7 +210,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     if (!sourceType) return toast('Specify source_type', 'error');
     if (!folderPath) return toast('Specify folder_path', 'error');
 
-    setStep(5);
+    setStep(6);
     setOrchestrateResp({ progress: [] });
     setIsOrchestrating(true);
     try {
@@ -689,6 +692,15 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                 />
               )}
               {step === 2 && (
+                <PipelineIntelligence
+                  clientName={selectedClient}
+                  onConfirm={(data) => {
+                    if (data) setIntelligenceData(data);
+                    setStep(3);
+                  }}
+                />
+              )}
+              {step === 3 && (
                 <StepSources
                   selectedClient={selectedClient}
                   apiSources={apiSources}
@@ -705,17 +717,17 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   openExplorer={openExplorer}
                   call={call}
                   refreshTrigger={localRefreshTrigger}
-                  onNext={() => { setStep(3); }}
+                  onNext={() => { setStep(4); }}
                 />
               )}
-              {step === 3 && (
+              {step === 4 && (
                 <StepConfig
                   selectedClient={selectedClient}
                   folderPath={folderPath}
                   sourceType={sourceType}
                   call={call}
                   toast={toast}
-                  onNext={() => { fetchDatasets(); setStep(4); }}
+                  onNext={() => { fetchDatasets(); setStep(5); }}
                   syncMasterConfig={syncMasterConfig}
                 />
               )}
@@ -750,11 +762,12 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   saveDqConfig={saveDqConfig}
                   editingConfigSaving={editingConfigSaving}
                   formatDatasetLabel={formatDatasetLabel}
-                  onRunOrchestration={runOrchestration}
+                  onRunOrchestration={() => setStep(6)}
                   isOrchestrating={isOrchestrating}
+                  intelligenceData={intelligenceData}
                 />
               )}
-              {step === 5 && (
+              {step === 6 && (
                 <StepProgress
                   orchestrateResp={orchestrateResp}
                   isOrchestrating={isOrchestrating}

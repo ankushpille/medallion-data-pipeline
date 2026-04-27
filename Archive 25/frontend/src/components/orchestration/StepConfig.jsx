@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import logo from '../../assets/images/image.png';
 
 export default function StepConfig({
-  selectedClient, folderPath, sourceType, call, toast, onNext, syncMasterConfig
+  selectedClient, folderPath, sourceType, call, toast, onNext, syncMasterConfig, intelligenceData
 }) {
   const navigate = useNavigate();
   const [configData, setConfigData] = useState([]);
@@ -21,7 +21,25 @@ export default function StepConfig({
     try {
       await syncMasterConfig();
       const res = await call(`/orchestrate/master-config?client_name=${encodeURIComponent(selectedClient)}&source_type=${encodeURIComponent(sourceType || '')}&dataset_ids=${encodeURIComponent(folderPath || '')}`);
-      setConfigData(res.config || []);
+      
+      // Auto-fill logic from Intelligence Scan
+      let loadedConfig = res.config || [];
+      if (intelligenceData && loadedConfig.length > 0) {
+        loadedConfig = loadedConfig.map(row => {
+          const newRow = { ...row };
+          if (intelligenceData.delimiter_config) {
+            if ('delimiter' in newRow || 'column_delimiter' in newRow) {
+               const key = 'delimiter' in newRow ? 'delimiter' : 'column_delimiter';
+               newRow[key] = intelligenceData.delimiter_config.column_delimiter;
+            }
+            if ('quote_char' in newRow) newRow.quote_char = intelligenceData.delimiter_config.quote_char;
+            if ('escape_char' in newRow) newRow.escape_char = intelligenceData.delimiter_config.escape_char;
+            if ('header' in newRow) newRow.header = intelligenceData.delimiter_config.header ? 'true' : 'false';
+          }
+          return newRow;
+        });
+      }
+      setConfigData(loadedConfig);
     } catch (e) {
       toast('Failed to load master configuration', 'error');
     } finally {
@@ -88,6 +106,16 @@ export default function StepConfig({
             <FiZap className={loading ? 'spin' : ''} style={{ marginRight: 6 }} /> Sync Config
           </button>
         </div>
+        
+        {intelligenceData && (
+          <div style={{ marginBottom: 20, padding: 12, background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.2)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, color: '#1d4ed8' }}>
+            <FiZap size={20} />
+            <div style={{ fontSize: 13, fontWeight: 500 }}>
+              <strong>Auto-generated Configuration:</strong> The settings below have been pre-filled using the intelligent scan results (Framework: {intelligenceData.framework}, Delimiters, Formats).
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <div className="config-table-wrapper">
             <table className="config-table">
