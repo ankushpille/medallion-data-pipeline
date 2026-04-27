@@ -1,0 +1,23 @@
+FROM public.ecr.aws/lambda/python:3.10
+
+# Install system packages useful for building Python wheels (adjust as needed)
+# Remove a conflicting openssl package seen in some base images then install
+# the development toolchain. If this still fails, consider using a multi-stage
+# build where wheels are compiled in a manylinux container and copied in.
+RUN yum -y remove openssl-snapsafe-libs || true \
+    && yum -y install gcc gcc-c++ make cmake libtool git openssl-devel bzip2-devel zlib-devel xz-devel \
+    && yum -y clean all
+
+# Install pip dependencies into image
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install -r /tmp/requirements.txt
+
+# Copy application code
+COPY . /var/task/
+
+# Ensure handler file is present
+ENV AWS_LAMBDA_FUNCTION_HANDLER=lambda_handler.handler
+
+# The base image will use the Lambda Runtime Interface Client; set the CMD to our handler
+CMD ["lambda_handler.handler"]

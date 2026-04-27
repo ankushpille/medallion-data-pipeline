@@ -1,0 +1,39 @@
+# Multi-stage Dockerfile: build Python wheels in a manylinux image, then
+# install them into the AWS Lambda Python runtime image. This avoids
+# installing a large build toolchain in the final image and improves
+# reproducibility for native packages.
+
+FROM quay.io/pypa/manylinux2014_x86_64 as builder
+
+# Copy requirements and build wheels for CPython 3.10 (manylinux provides /opt/python/*)
+COPY requirements.txt /tmp/requirements.txt
+
+# Build wheels for the required Python version (cp310).
+# First ensure pip/setuptools/wheel are up-to-date for the bundled interpreter,
+# then build wheels into /wheels.
+RUN grep -v -Ei '^pyarrow(\b|[=<>~])' /tmp/requirements.txt > /tmp/req_wheels.txt \
+    && /opt/python/cp310-cp310/bin/python -m pip install --upgrade pip setuptools wheel \
+    && /opt/python/cp310-cp310/bin/pip wheel -r /tmp/req_wheels.txt -w /wheels
+
+
+FROM public.ecr.aws/lambda/python:3.10
+
+# Copy wheels from builder and install from the local wheelhouse
+COPY requirements.txt /tmp/requirements.txt
+COPY --from=builder /wheels /wheels
+
+RUN pip install --upgrade pip setuptools wheel
+COPY --from=builder /tmp/req_wheels.txt /tmp/req_wheels.txt
+
+# Install prebuilt wheels from the local wheelhouse for most packages, then
+# install pyarrow from PyPI as a binary wheel (prefer-binary) to avoid building
+# Arrow C++ from source in the image.
+RUN pip install --no-index --find-links=/wheels -r /tmp/req_wheels.txt \
+    && pip install --prefer-binary pyarrow
+
+# Copy application code
+COPY . /var/task/
+
+# Handler and CMD
+ENV AWS_LAMBDA_FUNCTION_HANDLER=lambda_handler.handler
+CMD ["lambda_handler.handler"]

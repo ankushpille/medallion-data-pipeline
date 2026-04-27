@@ -1,0 +1,85 @@
+name: azure-project-fastapi
+
+command:
+  - "uvicorn"
+  - "main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  - name: APP_ENV
+    value: "local"
+
+  - name: DATABASE_URL
+    value: "${DATABASE_URL}"
+
+  - name: AZURE_STORAGE_ACCOUNT
+    value: "agdeagentstorage"
+
+  - name: AZURE_STORAGE_CONNECTION_STRING
+    value: "${AZURE_STORAGE_CONNECTION_STRING}"
+
+  - name: AZURE_CONTAINER_NAME
+    value: "ag-de-agent"
+
+  - name: ADLS_CONTAINER_NAME
+    value: "ag-de-agent"
+
+  - name: ADLS_ROOT_FOLDER
+    value: "landing"
+
+  - name: AZURE_TENANT_ID
+    value: "b8869792-ee44-4a05-a4fb-b6323a34ca35"
+
+  - name: AZURE_OPENAI_ENDPOINT
+    value: "https://nlp-analytics-project.openai.azure.com"
+
+  - name: AZURE_OPENAI_API_KEY
+    value: "${AZURE_OPENAI_API_KEY}"
+
+  - name: AZURE_OPENAI_DEPLOYMENT_NAME
+    value: "gpt-4o"
+
+  - name: SMTP_SERVER
+    value: "smtp.mail.yahoo.com"
+
+  - name: SMTP_PORT
+    value: "587"
+
+  - name: SMTP_USERNAME
+    value: "${SMTP_USERNAME}"
+
+  - name: SMTP_PASSWORD
+    value: "${SMTP_PASSWORD}"
+
+  - name: EMAIL_FROM
+    value: "${EMAIL_FROM}"
+
+  - name: EMAIL_TO
+    value: "${EMAIL_TO}"
+
+  - name: DATABRICKS_TOKEN
+    value: "${DATABRICKS_TOKEN}"
+
+  - name: DATABRICKS_HOST
+    value: "https://adb-972924413122017.17.azuredatabricks.net"
+
+  - name: DATABRICKS_SERVER_HOSTNAME
+    value: "adb-972924413122017.17.azuredatabricks.net"
+
+  - name: DATABRICKS_ORG_ID
+    value: "972924413122017"
+
+  - name: SQL_WAREHOUSE_ID
+    value: "a24680be22e988c1"
+
+  - name: DATABRICKS_HTTP_PATH
+    value: "/sql/1.0/warehouses/a24680be22e988c1"
+
+  - name: DATABRICKS_CATALOG
+    value: "ag_data_modeling"
+
+  - name: DATABRICKS_SCHEMA
+    value: "data_dictionary"

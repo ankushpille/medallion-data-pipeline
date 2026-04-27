@@ -1,0 +1,602 @@
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import Optional
+import json
+from sqlalchemy.orm import Session
+from core.database import get_db
+from orchestration.flow import build_graph
+from core.pipeline_service import PipelineService
+from models.master_config_authoritative import MasterConfigAuthoritative
+from models.metadata import PipelineRunHistory
+from loguru import logger
+from datetime import datetime
+
+router = APIRouter(prefix="/orchestrate", tags=["LangGraph Orchestration"])
+
+
+from langfuse import observe
+
+@observe()
+def _run_pipeline_for_client(client_name: str, db: Session) -> dict:
+    """Runs Bronze+Silver pipeline for ALL datasets of a client already in DB."""
+    datasets = db.query(MasterConfigAuthoritative).filter(
+        MasterConfigAuthoritative.client_name == client_name,
+        MasterConfigAuthoritative.is_active == True,
+    ).all()
+
+    if not datasets:
+        raise ValueError(f"No active datasets found for client '{client_name}'. "
+                         f"Run POST /upload/ingest or POST /s3/ingest first.")
+
+    svc     = PipelineService()
+    results = []
+    for mc in datasets:
+        try:
+            metrics = svc.run(mc.dataset_id, suppress_email=True)
+            results.append({
+                "dataset_id":   mc.dataset_id,
+                "dataset_name": mc.source_object,
+                "status":       "SUCCESS",
+                "metrics":      metrics,
+            })
+            logger.info(f"Pipeline OK: {mc.source_object} ({mc.dataset_id})")
+        except Exception as e:
+            results.append({
+                "dataset_id":   mc.dataset_id,
+                "dataset_name": mc.source_object,
+                "status":       "FAILURE",
+                "reason":       str(e),
+            })
+            logger.error(f"Pipeline FAILED: {mc.source_object}: {e}")
+
+    return {
+        "status":          "SUCCESS" if all(r["status"] == "SUCCESS" for r in results) else "PARTIAL",
+        "client_name":     client_name,
+        "success_count":   sum(1 for r in results if r["status"] == "SUCCESS"),
+        "failure_count":   sum(1 for r in results if r["status"] == "FAILURE"),
+        "pipeline_results": results,
+    }
+
+
+@router.post("/run")
+def run(
+    source_type:  str            = "ADLS",
+    client_name:  str            = "",
+    folder_path:  Optional[str]  = None,
+    batch_id:     Optional[str]  = None,
+    stream:       bool           = True,
+    db:           Session        = Depends(get_db),
+):
+    """
+    Universal orchestration endpoint — works for ALL source types:
+
+    ADLS  → source_type=ADLS,  client_name=AMGEN, folder_path=clinical
+    API   → source_type=API,   client_name=CDC,   folder_path=countries
+    LOCAL → source_type=LOCAL, client_name=AMGEN  (folder_path not needed — files already in Raw)
+    S3    → source_type=S3,    client_name=AWSDATA (folder_path not needed — files already in Raw)
+
+    For LOCAL and S3: run POST /upload/ingest or POST /s3/ingest FIRST to upload files.
+    Then call this endpoint — it picks up all uploaded files and runs Raw→Bronze→Silver.
+    """
+    if not client_name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+
+    src = source_type.upper().strip()
+
+    # All sources — go through full LangGraph orchestration
+    if not folder_path and src not in ("LOCAL", "S3"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"folder_path is required for source_type={src}. "
+                   f"For LOCAL or S3 sources, folder_path is not needed."
+        )
+    try:
+        graph = build_graph().compile()
+        state = {
+            "source_type": src,
+            "client_name": client_name,
+            "folder_path": folder_path,
+        }
+        if batch_id:
+            state["batch_id"] = batch_id
+        
+        # Determine the batch_id and create a history record
+        active_batch = state.get("batch_id") or datetime.now().strftime("%b-%d-%H")
+        run_record = PipelineRunHistory(
+            batch_id=active_batch,
+            client_name=client_name,
+            source_type=src,
+            folder_path=folder_path,
+            status="RUNNING"
+        )
+        db.add(run_record)
+        db.commit()
+        db.refresh(run_record)
+        run_id = run_record.run_id
+
+        if not stream:
+            # Single JSON response mode
+            res = graph.invoke(state)
+            progress_data = res.get("progress", [])
+            if isinstance(progress_data, dict):
+                progress_data = list(progress_data.values())
+                
+            return {
+                "status":           "SUCCESS",
+                "source_type":      src,
+                "client_name":      client_name,
+                "batch_id":         res.get("batch_id"),
+                "success_count":    len([r for r in res.get("pipeline_results", []) if r["status"] == "SUCCESS"]),
+                "failure_count":    len([r for r in res.get("pipeline_results", []) if r["status"] == "FAILURE"]),
+                "pipeline_results": res.get("pipeline_results", []),
+                "progress":         progress_data,
+                "master_config":    res.get("master_config", [])
+            }
+            
+        def event_stream():
+            accumulated_results = []
+            last_progress = []
+            try:
+                for output in graph.stream(state):
+                    for node_name, node_state in output.items():
+                        progress_data = node_state.get("progress", [])
+                        if isinstance(progress_data, dict):
+                            progress_data = list(progress_data.values())
+                        
+                        if progress_data:
+                            last_progress = progress_data
+                        
+                        # Dynamically include master_config if node provided it
+                        payload = {
+                            "node": node_name, 
+                            "progress": progress_data,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        if "master_config" in node_state:
+                            payload["master_config"] = node_state["master_config"]
+                        if "pipeline_results" in node_state:
+                            payload["pipeline_results"] = node_state["pipeline_results"]
+                            accumulated_results = node_state["pipeline_results"]
+                            
+                        yield json.dumps(payload) + "\n"
+                
+                # Final state after END - use accumulated results
+                total = len(accumulated_results)
+                succ = sum(1 for r in accumulated_results if r["status"] == "SUCCESS")
+                fail = sum(1 for r in accumulated_results if r["status"] == "FAILURE")
+                
+                # Update DB history
+                try:
+                    db_final = next(get_db()) # Get a fresh session for the stream's end
+                    hist = db_final.query(PipelineRunHistory).filter_by(run_id=run_id).first()
+                    if hist:
+                        hist.status = "SUCCESS" if fail == 0 else ("PARTIAL" if succ > 0 else "FAILURE")
+                        hist.end_time = datetime.utcnow()
+                        hist.total_datasets = total
+                        hist.success_count = succ
+                        hist.failure_count = fail
+                        hist.pipeline_results = accumulated_results
+                        db_final.commit()
+                except Exception as e:
+                    logger.error(f"Failed to update run history: {e}")
+
+                yield json.dumps({"status": "SUCCESS", "completed": True, "pipeline_results": accumulated_results, "progress": last_progress}) + "\n"
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                # Update DB with failure
+                try:
+                    db_fail = next(get_db())
+                    hist = db_fail.query(PipelineRunHistory).filter_by(run_id=run_id).first()
+                    if hist:
+                        hist.status = "FAILURE"
+                        hist.error_message = str(e)
+                        hist.end_time = datetime.utcnow()
+                        db_fail.commit()
+                except: pass
+                yield json.dumps({"status": "FAILURE", "error": str(e), "completed": True}) + "\n"
+                
+        return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+@router.get("/master-config")
+def get_master_config(client_name: str, source_type: str = None, dataset_ids: str = None, stream: bool = False):
+    """
+    Retrieves the Master Configuration CSV for a given client.
+    Optionally filters by a comma-separated list of dataset_ids.
+    If no config found, attempts ad-hoc discovery for storage sources.
+    """
+    if not client_name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+        
+    from core.master_config_manager import MasterConfigManager
+    mgr = MasterConfigManager()
+    key = mgr._get_config_key(client_name)
+    
+    try:
+
+        import pandas as pd
+        import numpy as np
+        import hashlib
+        
+
+        df = mgr._get_existing_config(key)
+        
+        # Determine if we should perform ad-hoc discovery for new paths
+        is_storage_path = dataset_ids and (dataset_ids.startswith("az://") or dataset_ids.startswith("s3://"))
+        
+        # If we have a path/endpoint, try ad-hoc discovery and merge with existing config
+        if dataset_ids and (is_storage_path or source_type in ("API", "LOCAL")):
+            logger.info(f"Ad-hoc discovery triggered for {client_name} @ {dataset_ids}")
+            from core.utils import generate_dataset_id
+            try:
+                new_rows = []
+                if dataset_ids.startswith("az://") or dataset_ids.startswith("s3://"):
+                    from core.mcp_connector import get_mcp_connector
+                    from core.utils import generate_dataset_id
+                    
+                    actual_src = "S3" if dataset_ids.startswith("s3://") else "ADLS"
+                    connector = get_mcp_connector(actual_src)
+                    
+                    logger.info(f"Direct {actual_src} discovery: path={dataset_ids}")
+                    # list_children returns folders and files
+                    children = connector.list_children(client_name, dataset_ids)
+                    
+                    for item in children.get("files", []):
+                        file_name = item["file_name"]
+                        file_path = item["file_path"] # Canonical e.g. s3://bucket/key or key
+                        
+                        d_id = generate_dataset_id(client_name, actual_src, file_path)
+                        
+                        # Only add if it doesn't already exist in the dataframe
+                        if df.empty or d_id not in df["dataset_id"].values:
+                            new_rows.append({
+                                "dataset_id": d_id,
+                                "pipeline_id": client_name.upper(),
+                                "client_name": client_name,
+                                "source_type": actual_src,
+                                "source_folder": dataset_ids,
+                                "source_object": file_name,
+                                "file_format": item.get("file_format", "UNKNOWN"),
+                                "raw_layer_path": file_path, # Landed path will be updated during _land in flow.py
+                                "target_layer_bronze": f"Bronze/{client_name}/{file_name.rsplit('.', 1)[0] if '.' in file_name else file_name}",
+                                "target_layer_silver": f"Silver/{client_name}/{file_name.rsplit('.', 1)[0] if '.' in file_name else file_name}",
+                                "is_active": True,
+                                "load_type": "full",
+                            })
+
+                elif source_type and source_type.upper() == "API":
+                    from core.mcp_connector import get_mcp_connector
+                    from core.utils import generate_dataset_id
+                    connector = get_mcp_connector(source_type)
+                    discovered = connector.list_datasets(client_name, dataset_ids)
+                    discovered_ids_for_filter = []
+                    if discovered:
+                        existing_ids = [str(v).lower() for v in df["dataset_id"].values] if not df.empty else []
+                        for ds in discovered:
+                            d_id = generate_dataset_id(client_name, source_type, ds.file_path)
+                            discovered_ids_for_filter.append(d_id.lower())
+                            if d_id.lower() not in existing_ids:
+                                new_rows.append({
+                                    "dataset_id": d_id,
+                                    "pipeline_id": client_name.upper(),
+                                    "client_name": client_name,
+                                    "source_type": source_type,
+                                    "source_folder": ds.file_path.rsplit('/', 1)[0] if '/' in ds.file_path else "",
+                                    "source_object": ds.file_name,
+                                    "file_format": ds.file_format,
+                                    "raw_layer_path": "",
+                                    "target_layer_bronze": f"Bronze/{client_name}/{ds.file_name.rsplit('.', 1)[0] if '.' in ds.file_name else ds.file_name}",
+                                    "target_layer_silver": f"Silver/{client_name}/{ds.file_name.rsplit('.', 1)[0] if '.' in ds.file_name else ds.file_name}",
+                                    "is_active": True,
+                                    "load_type": "full",
+                                })
+                elif source_type and source_type.upper() == "LOCAL":
+                    # Local files are already in Raw/client_name/ dataset_ids is a comma-separated list of filenames
+                    ids = [i.strip() for i in dataset_ids.split(",") if i.strip()]
+                    for d_id in ids:
+                        # Check if already in config
+                        if df.empty or d_id not in df["dataset_id"].values:
+                             # Try to derive name from ID (replace extension if needed)
+                             file_name = d_id
+                             new_rows.append({
+                                "dataset_id": d_id,
+                                "pipeline_id": client_name.upper(),
+                                "client_name": client_name,
+                                "source_type": "LOCAL",
+                                "source_folder": f"upload/{client_name}",
+                                "source_object": file_name,
+                                "file_format": file_name.split('.')[-1].upper() if '.' in file_name else "CSV",
+                                "raw_layer_path": f"Raw/{client_name}/{file_name}",
+                                "target_layer_bronze": f"Bronze/{client_name}/{file_name.rsplit('.', 1)[0] if '.' in file_name else file_name}",
+                                "target_layer_silver": f"Silver/{client_name}/{file_name.rsplit('.', 1)[0] if '.' in file_name else file_name}",
+                                "is_active": True,
+                                "load_type": "full",
+                            })
+                
+                if new_rows:
+                    new_df = pd.DataFrame(new_rows)
+                    df = pd.concat([df, new_df], ignore_index=True) if not df.empty else new_df
+                    # Persist immediately so /dq/suggest finds it
+                    mgr._save_config(df, key)
+                    logger.info(f"Ad-hoc discovery found and saved {len(new_rows)} NEW files in {dataset_ids}")
+                    
+                    # IMMEDIATELY SYNC TO DB so Step 4/6 finds the records
+                    try:
+                        from api.dq import sync_master_config, SyncRequest
+                        from core.database import SessionLocal
+                        db_session = SessionLocal()
+                        try:
+                            sync_master_config(SyncRequest(client_name=client_name), db_session)
+                        finally:
+                            db_session.close()
+                    except Exception as sync_err:
+                        logger.warning(f"Ad-hoc DB sync failed: {sync_err}")
+
+            except Exception as adhoc_err:
+                logger.warning(f"Ad-hoc discovery failed for {client_name}: {adhoc_err}")
+
+
+        # Skip filtering if we already scoped via ad-hoc discovery (path was the scope)
+        is_storage_path = dataset_ids and (dataset_ids.startswith("az://") or dataset_ids.startswith("s3://"))
+        
+        # Filter by dataset_ids if provided and it's NOT an already-scoped storage path
+        if dataset_ids and not is_storage_path:
+            target_ids = [tid.strip().lower() for tid in dataset_ids.split(",") if tid.strip()]
+            if not df.empty:
+                # Check for matches in multiple columns to be robust
+                mask = df["dataset_id"].astype(str).str.lower().isin(target_ids)
+                
+                # IMPORTANT: If any IDs were discovered ad-hoc in THIS request, they MUST be included in the mask
+                if 'discovered_ids_for_filter' in locals() and discovered_ids_for_filter:
+                    mask |= df["dataset_id"].astype(str).str.lower().isin(discovered_ids_for_filter)
+
+                if "source_object" in df.columns:
+                    # Match filename with or without extension
+                    mask |= df["source_object"].astype(str).str.lower().isin(target_ids)
+                    mask |= df["source_object"].astype(str).str.lower().apply(lambda x: x.rsplit(".", 1)[0] if "." in x else x).isin(target_ids)
+                
+                if "source_folder" in df.columns:
+                    # Match endpoint names strictly or if the stored folder is a sub-path of the search term
+                    # OR if the search term is a parent of the stored folder
+                    def is_path_match(stored_folder, target_id):
+                        s = str(stored_folder).lower().strip('/')
+                        t = str(target_id).lower().strip('/')
+                        if s == t: return True
+                        # If user asked for a parent, show children
+                        if s.startswith(t + '/'): return True
+                        # If user asked for a deep specific endpoint, show it even if stored as parent
+                        if t.startswith(s + '/'): return True
+                        return False
+
+                    mask |= df["source_folder"].astype(str).apply(lambda x: any(is_path_match(x, t) for t in target_ids))
+
+                df = df[mask]
+
+        
+        if df.empty:
+             if stream:
+                 def empty_gen(): yield json.dumps({"client_name": client_name, "message": "No config found"}) + "\n"
+                 return StreamingResponse(empty_gen(), media_type="application/x-ndjson")
+             return {"client_name": client_name, "config": [], "message": "No master configuration found for this client."}
+
+        # Replace NaN/NaT with None for JSON compliance
+        df = df.replace({np.nan: None})
+        records = df.to_dict(orient="records")
+
+        if stream:
+            def record_stream():
+                for r in records:
+                    yield json.dumps(r) + "\n"
+                yield json.dumps({"status": "SUCCESS", "completed": True}) + "\n"
+            return StreamingResponse(record_stream(), media_type="application/x-ndjson")
+
+        return {
+            "client_name": client_name, 
+            "location": f"az://{mgr.bucket_name}/{key}",
+            "config": records
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch master config for {client_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class MasterConfigUpdateRequest(BaseModel):
+    client_name: str
+    config: list[dict]
+
+@router.get("/preview")
+def preview_data(s3_url: str):
+    """
+    Fetches the first 10-20 records of a file in Azure storage (CSV or Parquet)
+    for interactive preview in the orchestration UI.
+    """
+    if not s3_url:
+        raise HTTPException(status_code=400, detail="s3_url is required")
+        
+    from core.azure_storage import get_storage_client, AzureStorageClient
+    import pandas as pd
+    import io
+    import numpy as np
+    
+    try:
+        container, key = AzureStorageClient.parse_az_url(s3_url)
+        az: AzureStorageClient = get_storage_client()
+        
+        # Try direct read
+        content = None
+        try:
+            obj = az.get_object(Container=container, Key=key)
+            content = obj["Body"].read()
+            final_key = key
+        except Exception as e:
+            # If path is a folder (common for Silver/Bronze parquet), find first file
+            if "BlobNotFound" in str(e) or "404" in str(e):
+                logger.debug(f"Path {key} not found as single blob, listing children...")
+                prefix = key.strip("/") + "/"
+                list_res = az.list_objects_v2(Prefix=prefix, Container=container)
+
+                all_blobs = [c["Key"] for c in list_res.get("Contents", [])]
+                
+                # Preferred: extensions
+                files = [k for k in all_blobs if any(k.lower().endswith(ext) for ext in (".parquet", ".csv", ".json"))]
+                
+                if not files:
+                    # Fallback: any file NOT metadata
+                    files = [k for k in all_blobs if not any(m in k.lower() for m in ("_metadata", "_success", ".crc", ".metadata"))]
+                
+                if not files:
+                    raise FileNotFoundError(f"No previewable files found in {s3_url}")
+                    
+                # Pick the first actual data file
+                final_key = files[0]
+                logger.info(f"Resolved folder {key} to file {final_key} for preview (Fallback mode)")
+                obj = az.get_object(Container=container, Key=final_key)
+                content = obj["Body"].read()
+
+            else:
+                raise
+        
+        df = None
+        lower_key = final_key.lower()
+        if lower_key.endswith(".parquet"):
+            df = pd.read_parquet(io.BytesIO(content))
+        elif lower_key.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(content), nrows=50)
+        elif lower_key.endswith(".json"):
+            df = pd.read_json(io.BytesIO(content), lines=True, nrows=50)
+        else:
+            # Fallback: Try JSON, then CSV
+            try:
+                df = pd.read_json(io.BytesIO(content), lines=True, nrows=50)
+                logger.info("Fallback: Decoded as JSON (lines=True)")
+            except:
+                try:
+                    df = pd.read_json(io.BytesIO(content), lines=False, nrows=50)
+                    logger.info("Fallback: Decoded as JSON (lines=False)")
+                except:
+                    try:
+                        df = pd.read_csv(io.BytesIO(content), nrows=50)
+                        logger.info("Fallback: Decoded as CSV")
+                    except:
+                        logger.warning("All fallbacks failed for file format detection.")
+        
+        if df is None:
+            raise ValueError(f"Unsupported file format for preview: {final_key}")
+            
+        # Replace NaN/NaT for JSON compliance
+        df = df.replace({np.nan: None})
+        
+        return {
+            "path": s3_url,
+            "resolved_file": final_key,
+            "columns": list(df.columns),
+            "rows": df.head(10).to_dict(orient="records"),
+            "total_sample_rows": len(df)
+        }
+    except Exception as e:
+        logger.error(f"Preview failed for {s3_url}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class InitializeRequest(BaseModel):
+    source_type:  str
+    client_name:  str
+    folder_path:  Optional[str] = None
+
+@router.post("/initialize")
+def initialize_orchestration(
+    request: InitializeRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Runs Discovery, Landing, and Configuration nodes to generate master_config.csv.
+    Useful for brand new clients/sources before the user starts the full pipeline.
+    """
+    if not request.client_name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+        
+    from orchestration.flow import _discover, _land, _configure
+    
+    try:
+        # 1. Start with initial state
+        state = {
+            "source_type": request.source_type.upper().strip(),
+            "client_name": request.client_name,
+            "folder_path": request.folder_path,
+            "progress": {}
+        }
+        
+        # 2. Sequential node execution
+        state = _discover(state)
+        state = _land(state)
+        state = _configure(state)
+        
+        # 3. Sync to DB so it shows up in MasterConfigAuthoritative
+        from api.dq import sync_master_config, SyncRequest
+        try:
+            sync_master_config(SyncRequest(client_name=request.client_name), db)
+        except Exception as e:
+            logger.warning(f"Initial sync to DB failed (CSV was created but DB sync skipped): {e}")
+
+        return {
+            "status": "SUCCESS",
+            "message": "Orchestration initialized. Master configuration generated and synced.",
+            "datasets_found": len(state.get("datasets", [])),
+            "batch_id": state.get("batch_id")
+        }
+    except Exception as e:
+        logger.error(f"Initialization failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/master-config/update")
+def update_master_config_file(request: MasterConfigUpdateRequest):
+    """
+    Updates the Master Configuration CSV for a client. 
+    Accepts JSON records and persists them back to Azure Blob Storage.
+    """
+    if not request.client_name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+    if not request.config:
+         raise HTTPException(status_code=400, detail="config data is empty")
+         
+    from core.master_config_manager import MasterConfigManager, MASTER_CONFIG_COLUMNS
+    import pandas as pd
+    
+    mgr = MasterConfigManager()
+    key = mgr._get_config_key(request.client_name)
+    
+    try:
+        # Convert JSON records to DataFrame
+        df = pd.DataFrame(request.config)
+        
+        # Ensure only valid columns are saved
+        # If any column is missing from input, add it as null
+        for col in MASTER_CONFIG_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+        
+        # Order columns correctly
+        df = df[MASTER_CONFIG_COLUMNS]
+        
+        # Save back to Azure
+        mgr._save_config(df, key)
+        
+        return {
+            "status": "SUCCESS",
+            "message": f"Master Configuration for {request.client_name} updated successfully.",
+            "rows": len(df)
+        }
+    except Exception as e:
+        logger.error(f"Failed to update master config for {request.client_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/history")
+def get_run_history(limit: int = 50, db: Session = Depends(get_db)):
+    """Fetches the most recent pipeline execution runs from the history table."""
+    try:
+        runs = db.query(PipelineRunHistory).order_by(PipelineRunHistory.start_time.desc()).limit(limit).all()
+        return {"status": "SUCCESS", "runs": runs}
+    except Exception as e:
+        logger.error(f"Failed to fetch run history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,511 @@
+import os
+import json
+import base64
+import asyncio
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+from loguru import logger
+from core.utils import parse_s3_url
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+# ---------------------------------------------------------
+# CONSTANTS & CONFIG
+# ---------------------------------------------------------
+
+class SourceType(str, Enum):
+    ADLS = "ADLS"
+    S3   = "S3"
+    API  = "API"
+
+@dataclass
+class DatasetInfo:
+    """
+    Standard Standardized Output for all Connectors
+    """
+    file_name: str
+    file_path: str 
+    file_format: str
+    file_size: int
+    source_type: str
+    client_name: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file_name": self.file_name,
+            "file_path": self.file_path,
+            "file_format": self.file_format,
+            "file_size": self.file_size,
+            "source_type": self.source_type,
+            "client_name": self.client_name
+        }
+
+# ---------------------------------------------------------
+# INTERFACE
+# ---------------------------------------------------------
+
+class MCPSourceConnector(ABC):
+    """
+    Base Interface for MCP Source Connectors.
+    Now acts as a Wrapper around the MCP Bridge.
+    """
+    @abstractmethod
+    def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
+        pass
+
+    @abstractmethod
+    def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        pass
+
+    @abstractmethod
+    def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
+        pass
+
+
+# ---------------------------------------------------------
+# MCP BRIDGE (Client Logic)
+# ---------------------------------------------------------
+
+class MCPBridge:
+    """
+    Manages the connection to the MCP Server process.
+    """
+    def __init__(self):
+        
+        self.server_script = os.path.join(os.getcwd(), "core", "mcp_server.py")
+        
+        
+        import sys
+        self.server_params = StdioServerParameters(
+            command=sys.executable,
+            args=[self.server_script],
+            env=os.environ.copy()
+        )
+    
+    async def _call_tool(self, tool_name: str, arguments: dict) -> Any:
+        """
+        Connects, calls tool, disconnects. 
+        """
+        async with stdio_client(self.server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(tool_name, arguments=arguments)
+                
+                # FastMCP returns a list of TextContent/ImageContent
+                if result.content and hasattr(result.content[0], "text"):
+                     text_resp = result.content[0].text
+                     try:
+                         # Our tool returns JSON string
+                         return json.loads(text_resp)
+                     except json.JSONDecodeError:
+                         return text_resp
+                return None
+
+    def run_tool_sync(self, tool_name: str, arguments: dict) -> Any:
+        """
+        Helper to run async MCP calls synchronously (since existing IngestionService is sync).
+        """
+        return asyncio.run(self._call_tool(tool_name, arguments))
+
+
+# ---------------------------------------------------------
+# IMPLEMENTATIONS (Proxies)
+# ---------------------------------------------------------
+
+class S3Connector(MCPSourceConnector):
+    def __init__(self):
+        self.source_type = SourceType.S3.value
+
+    def _get_client_and_bucket(self, client_name: str, folder_path: str):
+        """
+        Helper to extract bucket from path and create a boto3 client 
+        using credentials from APISourceConfig DB.
+        """
+        import boto3
+        from core.database import SessionLocal
+        from models.api_source_config import APISourceConfig
+        
+        bucket, prefix = parse_s3_url(folder_path)
+
+        db = SessionLocal()
+        try:
+            # First try finding by bucket name if we have it
+            query = db.query(APISourceConfig).filter(APISourceConfig.source_type == "S3")
+            if bucket:
+                config = query.filter(APISourceConfig.aws_bucket_name == bucket).first()
+            else:
+                # Fallback to finding by client name
+                config = query.filter(APISourceConfig.client_name == client_name).first()
+                if config:
+                    bucket = config.aws_bucket_name
+            
+            if not config:
+                raise RuntimeError(f"No S3 configuration found for client '{client_name}' or bucket '{bucket}' in registry.")
+            
+            s3 = boto3.client(
+                's3',
+                aws_access_key_id=config.aws_access_key,
+                aws_secret_access_key=config.aws_secret_key,
+                region_name=config.aws_region or "us-east-1"
+            )
+            return s3, bucket, prefix
+        finally:
+            db.close()
+
+    def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
+        from core.mcp_server import _normalize_path
+        logger.info(f"S3 Connector: Requesting list_datasets for {client_name} via Direct API")
+        
+        try:
+            s3, bucket, prefix = self._get_client_and_bucket(client_name, folder_path)
+            
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            datasets = []
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                name = key.split("/")[-1]
+                if not name: continue
+                
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                canonical_path = f"s3://{bucket}/{key}"
+                
+                datasets.append(DatasetInfo(
+                    file_name   = name,
+                    file_path   = canonical_path,
+                    file_format = ext.upper() if ext else "UNKNOWN",
+                    file_size   = obj.get("Size", 0),
+                    source_type = "S3",
+                    client_name = client_name,
+                ))
+            return datasets
+        except Exception as e:
+            raise RuntimeError(f"S3Connector list_datasets failed: {e}")
+
+    def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        logger.info(f"S3 Connector: Requesting content for {file_path_canonical} via Direct API")
+        
+        try:
+            s3, bucket, key = self._get_client_and_bucket(client_name, file_path_canonical)
+            
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            return obj["Body"].read()
+        except Exception as e:
+            raise RuntimeError(f"S3Connector get_file_content failed for {file_path_canonical}: {e}")
+
+    def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
+        from core.mcp_server import _normalize_path
+        logger.info(f"S3 Connector: Requesting list_children for {folder_path} via Direct API")
+        
+        try:
+            s3, bucket, prefix = self._get_client_and_bucket(client_name, folder_path)
+            if prefix and not prefix.endswith("/"):
+                prefix += "/"
+                
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
+            
+            folders = []
+            for p in resp.get("CommonPrefixes", []):
+                folder_path_s3 = p.get("Prefix")
+                name = folder_path_s3.strip("/").split("/")[-1]
+                folders.append(name)
+                
+            files = []
+            for c in resp.get("Contents", []):
+                key = c.get("Key")
+                if key == prefix: continue
+                name = key.split("/")[-1]
+                if not name: continue
+                
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                canonical_path = f"s3://{bucket}/{key}"
+                
+                files.append({
+                    "file_name": name,
+                    "file_path": canonical_path,
+                    "file_format": ext.upper() if ext else "UNKNOWN",
+                    "file_size": c.get("Size", 0)
+                })
+                
+            return {
+                "folders": sorted(folders),
+                "files": files
+            }
+        except Exception as e:
+            raise RuntimeError(f"S3Connector list_children failed: {e}")
+
+
+class ADLSConnector(MCPSourceConnector):
+    def __init__(self):
+        self.source_type = SourceType.ADLS.value
+
+    def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
+        from core.azure_storage import AzureStorageClient
+        from core.mcp_server import _normalize_path
+        storage = AzureStorageClient()
+        
+        logger.info(f"ADLS Connector: Requesting list_datasets for {client_name} via Direct API")
+        
+        container = None
+        prefix = folder_path
+        
+        if folder_path and folder_path.startswith("az://"):
+            container, prefix = storage.parse_az_url(folder_path)
+            
+        container = container or os.getenv("ADLS_CONTAINER_NAME", "ag-de-agent")
+        
+        try:
+            resp = storage.list_objects_v2(Prefix=prefix, Container=container)
+            datasets = []
+            for obj in resp.get("Contents", []):
+                key  = obj["Key"]
+                name = key.split("/")[-1]
+                if not name or "/" in key[len(prefix):].lstrip("/"): 
+                    continue # Skip subdirectories if we only want immediate files, but list_objects_v2 is recursive...
+                
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                canonical_path = _normalize_path(key, client_name, "ADLS")
+                
+                datasets.append(DatasetInfo(
+                    file_name   = name,
+                    file_path   = canonical_path,
+                    file_format = ext.upper() if ext else "UNKNOWN",
+                    file_size   = obj.get("Size", 0),
+                    source_type = "ADLS",
+                    client_name = client_name,
+                ))
+            return datasets
+        except Exception as e:
+            raise RuntimeError(f"ADLSConnector list_datasets failed: {e}")
+
+    def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        from core.azure_storage import AzureStorageClient
+        storage = AzureStorageClient()
+        
+        logger.info(f"ADLS Connector: Requesting content for {file_path_canonical} via Direct API")
+        
+        container = None
+        key = file_path_canonical
+        
+        if file_path_canonical and file_path_canonical.startswith("az://"):
+            container, key = storage.parse_az_url(file_path_canonical)
+        else:
+            from core.mcp_server import _build_search_path
+            key = _build_search_path(client_name, file_path_canonical)
+            
+        container = container or os.getenv("ADLS_CONTAINER_NAME", "ag-de-agent")
+        
+        try:
+            obj = storage.get_object(Key=key, Container=container)
+            return obj["Body"].read()
+        except Exception as e:
+            raise RuntimeError(f"ADLSConnector get_file_content failed for {file_path_canonical}: {e}")
+
+    def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
+        from core.azure_storage import AzureStorageClient
+        from core.mcp_server import _normalize_path
+        storage = AzureStorageClient()
+        
+        logger.info(f"ADLS Connector: Requesting list_children for {folder_path} via Direct API")
+        
+        container = None
+        prefix = folder_path
+        
+        if folder_path and folder_path.startswith("az://"):
+            container, prefix = storage.parse_az_url(folder_path)
+            
+        container = container or os.getenv("ADLS_CONTAINER_NAME", "ag-de-agent")
+        
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+            
+        try:
+            resp = storage.list_objects_v2(Prefix=prefix, Container=container)
+            folders_set = set()
+            files = []
+            
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                rel = key[len(prefix):].lstrip("/") if prefix else key
+                
+                if not rel:
+                    continue
+                    
+                if "/" in rel:
+                    folders_set.add(rel.split("/")[0])
+                else:
+                    name = key.split("/")[-1]
+                    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                    canonical_path = _normalize_path(key, client_name, "ADLS")
+                    
+                    files.append({
+                        "file_name": name,
+                        "file_path": canonical_path,
+                        "file_format": ext.upper() if ext else "UNKNOWN",
+                        "file_size": obj.get("Size", 0)
+                    })
+                    
+            return {
+                "folders": sorted(list(folders_set)),
+                "files": files
+            }
+        except Exception as e:
+            raise RuntimeError(f"ADLSConnector list_children failed: {e}")
+
+
+
+
+
+class APIConnector(MCPSourceConnector):
+    """
+    Connector for REST API sources.
+    Calls the API MCP tools (list_api_datasets, get_api_file_content, list_api_children).
+    The API is configured entirely through .env variables:
+      API_BASE_URL, API_AUTH_TYPE, API_AUTH_TOKEN, API_ENDPOINTS
+    """
+    def __init__(self):
+        self.bridge = MCPBridge()
+        self.source_type = SourceType.API.value
+
+    def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
+        logger.info(f"APIConnector: list_datasets for {client_name}/{folder_path}")
+        
+        # Handle multiple endpoints separated by comma, but DON'T split if it's already a full URI
+        if folder_path.startswith("az://") or folder_path.startswith("s3://") or folder_path.startswith("http"):
+            endpoints = [folder_path.strip()]
+        else:
+            endpoints = [ep.strip() for ep in folder_path.split(",") if ep.strip()]
+        
+        all_datasets = []
+        
+        for ep in endpoints:
+            try:
+                resp = self.bridge.run_tool_sync(
+                    "list_api_datasets",
+                    {"source_type": self.source_type, "client_name": client_name, "folder_path": ep}
+                )
+                if isinstance(resp, dict) and "error" in resp:
+                    logger.warning(f"MCP Server Error for endpoint {ep}: {resp['error']}")
+                    continue
+                if not isinstance(resp, list):
+                    logger.warning(f"Unexpected response for {ep}: {resp}")
+                    continue
+                all_datasets.extend([DatasetInfo(**d) for d in resp])
+            except Exception as e:
+                logger.error(f"Failed to list datasets for API endpoint {ep}: {e}")
+        
+        return all_datasets
+
+    def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        logger.info(f"APIConnector: get_file_content for {file_path_canonical}")
+        resp = self.bridge.run_tool_sync(
+            "get_api_file_content",
+            {"source_type": self.source_type, "client_name": client_name, "file_path_canonical": file_path_canonical}
+        )
+        if isinstance(resp, dict) and "error" in resp:
+            raise RuntimeError(f"MCP Server Error: {resp['error']}")
+        if isinstance(resp, dict) and "content_base64" in resp:
+            return base64.b64decode(resp["content_base64"])
+        raise ValueError(f"Unexpected content response: {resp}")
+
+    def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
+        resp = self.bridge.run_tool_sync(
+            "list_api_children",
+            {"source_type": self.source_type, "client_name": client_name, "folder_path": folder_path}
+        )
+        if isinstance(resp, dict) and "error" in resp:
+            raise RuntimeError(f"MCP Server Error: {resp['error']}")
+        return resp
+
+
+# ---------------------------------------------------------
+# FACTORY
+# ---------------------------------------------------------
+
+
+
+# ---------------------------------------------------------
+# LOCAL CONNECTOR — reads files already uploaded to Raw layer
+# ---------------------------------------------------------
+
+class LocalConnector(MCPSourceConnector):
+    """
+    Connector for locally uploaded files.
+    Files are already in Azure Raw layer via POST /upload/ingest.
+    Reads them back from blob so the agent can process them normally.
+    """
+
+    def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
+        from core.azure_storage import get_storage_client
+        from core.settings import settings
+        storage   = get_storage_client()
+        container = settings.AZURE_CONTAINER_NAME or "ag-de-agent"
+        # folder_path for LOCAL = "upload/<client_name>" or a specific batch prefix
+        prefix    = folder_path.strip("/") + "/" if folder_path else f"Raw/{client_name}/"
+        if not prefix.startswith("Raw/"):
+            prefix = f"Raw/{client_name}/"
+
+        try:
+            resp = storage.list_objects_v2(Prefix=prefix, Container=container)
+            datasets = []
+            for obj in resp.get("Contents", []):
+                key  = obj["Key"]
+                name = key.split("/")[-1]
+                if not name or "." not in name:
+                    continue
+                ext = name.rsplit(".", 1)[-1].lower()
+                if ext not in ("csv", "json", "parquet", "xlsx", "xls", "tsv"):
+                    continue
+                datasets.append(DatasetInfo(
+                    file_name   = name,
+                    file_path   = key,
+                    file_format = ext.upper(),
+                    file_size   = obj.get("Size", 0),
+                    source_type = "LOCAL",
+                    client_name = client_name,
+                ))
+            return datasets
+        except Exception as e:
+            raise RuntimeError(f"LocalConnector list_datasets failed: {e}")
+
+    def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        from core.azure_storage import get_storage_client
+        from core.settings import settings
+        storage   = get_storage_client()
+        container = settings.AZURE_CONTAINER_NAME or "ag-de-agent"
+        try:
+            obj = storage.get_object(Key=file_path_canonical, Container=container)
+            return obj["Body"].read()
+        except Exception as e:
+            raise RuntimeError(f"LocalConnector get_file_content failed for {file_path_canonical}: {e}")
+
+    def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
+        datasets = self.list_datasets(client_name, folder_path)
+        return {
+            "folders": [],
+            "files": [{"file_name": d.file_name, "file_path": d.file_path,
+                       "file_format": d.file_format, "file_size": d.file_size}
+                      for d in datasets]
+        }
+
+
+
+def get_mcp_connector(source_type: str) -> MCPSourceConnector:
+    """
+    Factory method to get the appropriate connector.
+    Supported: ADLS, API, LOCAL, S3
+    """
+    src = (source_type or "").upper().strip()
+    if src == "ADLS":
+        return ADLSConnector()
+    elif src == "API":
+        return APIConnector()
+    elif src == "LOCAL":
+        return LocalConnector()
+    elif src == "S3":
+        return S3Connector()
+    else:
+        raise ValueError(f"Unsupported source type: {source_type}. Supported: ADLS, API, LOCAL, S3")
