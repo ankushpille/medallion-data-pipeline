@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { apiCall, useApi, getBase } from '../hooks/useApi';
+import { useApi, apiUrl } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import { FiX, FiCheck, FiZap, FiEdit2, FiRefreshCw, FiBarChart2, FiClipboard, FiSearch, FiSettings, FiActivity, FiFolder, FiFileText, FiEye, FiDownload, FiCornerUpLeft, FiHome, FiClock } from 'react-icons/fi';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -163,7 +163,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       for (let i = 0; i < uploadFiles.length; i++) {
         form.append('files', uploadFiles[i], uploadFiles[i].name);
       }
-      const resp = await fetch(getBase() + '/upload/ingest', { method: 'POST', body: form });
+      const resp = await fetch(apiUrl('/upload/ingest'), { method: 'POST', body: form });
       if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
       const data = await resp.json();
       if (data.status && data.status.toUpperCase() === 'SUCCESS') {
@@ -213,7 +213,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     try {
       toast('Running orchestration — streaming progress...', 'info');
       const qs = `?source_type=${encodeURIComponent(sourceType)}&client_name=${encodeURIComponent(selectedClient)}&folder_path=${encodeURIComponent(folderPath)}`;
-      const response = await fetch(getBase() + `/orchestrate/run${qs}`, {
+      const response = await fetch(apiUrl(`/orchestrate/run${qs}`), {
         method: 'POST',
         headers: { 'Accept': 'application/x-ndjson' }
       });
@@ -1122,4 +1122,3 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     </div>
   );
 }
-

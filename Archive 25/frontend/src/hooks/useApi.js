@@ -1,23 +1,27 @@
 import { useState, useCallback } from 'react';
 
 const BASE_KEY = 'dea_base_url';
+export const API_BASE_URL = (process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:8001').replace(/\/$/, '');
 
 export function getBase() {
-  return localStorage.getItem(BASE_KEY) || '';
+  return (localStorage.getItem(BASE_KEY) || API_BASE_URL).replace(/\/$/, '');
 }
 
 export function setBase(url) {
   localStorage.setItem(BASE_KEY, url.replace(/\/$/, ''));
 }
 
+export function apiUrl(path) {
+  return `${getBase()}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export async function apiCall(path, method = 'GET', body = null) {
-  const base = getBase();
   const opts = {
     method,
     headers: { 'Content-Type': 'application/json', accept: 'application/json' },
   };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(base + path, opts);
+  const res = await fetch(apiUrl(path), opts);
   return res.json();
 }
 
