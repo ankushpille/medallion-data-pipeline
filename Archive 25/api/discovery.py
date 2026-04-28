@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
 from services.pipeline_intelligence_service import analyze_pipeline_live
 
@@ -11,6 +11,10 @@ router = APIRouter(prefix="/discovery", tags=["Pipeline Intelligence"])
 class AnalyzeRequest(BaseModel):
     client_name: str
     target: Optional[str] = None
+    auth_mode: Optional[str] = None
+    credentials: Optional[Dict[str, Any]] = None
+    use_cloud_llm: bool = True
+    llm_provider: str = "gpt"
     use_local_llm: bool = False
     scan_mode: str = "live"
     providers: Optional[str] = None
@@ -33,6 +37,10 @@ async def run_discovery_analyze(request: AnalyzeRequest, http_request: Request):
             client_name=request.client_name,
             providers=providers,
             target=request.target,
+            auth_mode=request.auth_mode,
+            credentials=request.credentials,
+            use_cloud_llm=request.use_cloud_llm,
+            llm_provider=request.llm_provider,
             use_local_llm=request.use_local_llm,
             scan_mode=request.scan_mode,
             authorization_token=bearer_token,

@@ -1,9 +1,10 @@
-import { FiCheck, FiZap, FiFolder, FiFile, FiChevronRight, FiRefreshCw, FiClock, FiLink, FiBox, FiCloud } from 'react-icons/fi';
+import { FiCheck, FiZap, FiFolder, FiFile, FiChevronRight, FiRefreshCw, FiClock, FiLink, FiBox, FiCloud, FiSearch } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import FluentSelect from '../FluentSelect';
 import logo from '../../assets/images/image.png';
+import CloudPortalScanModal from './CloudPortalScanModal';
 
 export default function StepSources({
   selectedClient, apiSources, s3Sources = [], adlsSources = [], apiSourcesLoading,
@@ -11,12 +12,13 @@ export default function StepSources({
   selectedEndpoint, setSelectedEndpoint,
   setSourceType, setFolderPath,
   setShowUploadModal, openExplorer, onNext, call,
-  refreshTrigger, intelligenceData
+  refreshTrigger, intelligenceData, setIntelligenceData
 }) {
   const navigate = useNavigate();
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
   const [selectedLocalFiles, setSelectedLocalFiles] = useState([]);
+  const [showCloudScanModal, setShowCloudScanModal] = useState(false);
 
   useEffect(() => {
     if (selectedClient) {
@@ -156,6 +158,13 @@ export default function StepSources({
               </button>
             ))}
           </div>
+          <button
+            className="orch-btn tiny"
+            onClick={() => setShowCloudScanModal(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}
+          >
+            <FiSearch /> Scan Framework
+          </button>
           
           <div className="header-logo-divider" style={{ width: 1, height: 24, background: 'rgba(0,0,0,0.1)', marginLeft: 8 }} />
           <img src={logo} alt="Agilisium" style={{ height: 28, objectFit: 'contain' }} />
@@ -295,6 +304,15 @@ export default function StepSources({
                         )}
                       </div>
                       <div className="source-actions">
+                        <button
+                          className="orch-btn tiny ghost"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowCloudScanModal(true);
+                          }}
+                        >
+                          <FiSearch style={{ marginRight: 6 }} /> Scan Framework
+                        </button>
                         <button 
                           className="orch-btn tiny"
                           onClick={(e) => {
@@ -371,6 +389,9 @@ export default function StepSources({
                     <FiChevronRight size={48} style={{ opacity: 0.2, marginBottom: 16 }} />
                     <div style={{ fontWeight: 600, color: 'var(--text2)' }}>No ADLS Containers Connected</div>
                     <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>Register a new ADLS source in Step 1 to see it here.</div>
+                    <button className="orch-btn tiny" onClick={() => setShowCloudScanModal(true)} style={{ marginTop: 14 }}>
+                      <FiSearch style={{ marginRight: 6 }} /> Scan Framework
+                    </button>
                   </div>
                 )}
               </div>
@@ -389,6 +410,24 @@ export default function StepSources({
           </button>
         </div>
       </div>
+      {showCloudScanModal && (
+        <CloudPortalScanModal
+          selectedClient={selectedClient}
+          onClose={() => setShowCloudScanModal(false)}
+          onScanComplete={(result) => {
+            setIntelligenceData?.(result);
+            const details = result?.ingestion_details || result?.reformatted_config || {};
+            const nextSourceType = details.source_type;
+            const nextPath = details.source_path;
+            if (nextSourceType) setSourceType(nextSourceType);
+            if (nextPath) {
+              setFolderPath(nextPath);
+              setSelectedEndpoint(nextPath);
+              setSelectedApiSource('framework-scan');
+            }
+          }}
+        />
+      )}
     </motion.div>
   );
 }

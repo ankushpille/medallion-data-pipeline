@@ -2,18 +2,24 @@ import logging
 import os
 import json
 from typing import Optional, Dict, Any, List
+from urllib import request as urlrequest
 
 from engine.scanner.manager import scanner_manager
 
 logger = logging.getLogger(__name__)
 
 class DummySettings:
-    def __init__(self):
-        self.aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
-        self.aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        self.azure_client_id = os.getenv("AZURE_CLIENT_ID")
-        self.azure_client_secret = os.getenv("AZURE_CLIENT_SECRET")
-        self.azure_tenant_id = os.getenv("AZURE_TENANT_ID")
+    def __init__(self, credentials: Optional[Dict[str, Any]] = None):
+        creds = credentials or {}
+        self.aws_access_key_id = creds.get("access_key") or creds.get("aws_access_key_id") or os.getenv("AWS_ACCESS_KEY_ID")
+        self.aws_secret_access_key = creds.get("secret_key") or creds.get("aws_secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        self.aws_region = creds.get("region") or os.getenv("AWS_REGION")
+        self.aws_role_arn = creds.get("role_arn") or os.getenv("AWS_ROLE_ARN")
+        self.azure_client_id = creds.get("client_id") or os.getenv("AZURE_CLIENT_ID")
+        self.azure_client_secret = creds.get("client_secret") or os.getenv("AZURE_CLIENT_SECRET")
+        self.azure_tenant_id = creds.get("tenant_id") or os.getenv("AZURE_TENANT_ID")
+        self.azure_subscription_id = creds.get("subscription_id") or os.getenv("AZURE_SUBSCRIPTION_ID")
+        self.azure_resource_group = creds.get("resource_group") or os.getenv("AZURE_RESOURCE_GROUP")
         self.databricks_host = os.getenv("DATABRICKS_HOST")
         self.databricks_token = os.getenv("DATABRICKS_TOKEN")
 
@@ -120,10 +126,98 @@ def _build_config(client_name: str, target: str, file_types: List[str], delimite
     }
 
 
+def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
+    import re
+    match = re.search(r"(\{[\s\S]*\})", text or "")
+    if match:
+        text = match.group(1)
+    text = (text or "").strip().replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _cloud_llm_extract(scan_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    azure_key = os.getenv("AZURE_OPENAI_API_KEY", "")
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    if not azure_key or not azure_endpoint:
+        logger.info("GPT extraction skipped because Azure OpenAI env vars are not configured.")
+        return None
+
+    prompt = {
+        "task": "Normalize cloud framework discovery into DEA pipeline intelligence JSON.",
+        "required_keys": [
+            "source_systems",
+            "ingestion_support",
+            "ingestion_types",
+            "file_types",
+            "delimiter_config",
+            "dq_rules",
+            "pipeline_capabilities",
+            "reformatted_config",
+            "llm_summary",
+        ],
+        "scan_result": scan_result,
+    }
+    body = {
+        "messages": [
+            {
+                "role": "system",
+                "content": "You extract data engineering pipeline facts from cloud inventory. Respond with only valid JSON. Do not invent secrets or credentials.",
+            },
+            {"role": "user", "content": json.dumps(prompt, default=str)},
+        ],
+        "max_tokens": 3000,
+        "temperature": 0,
+    }
+    headers = {"Content-Type": "application/json", "api-key": azure_key}
+
+    try:
+        req = urlrequest.Request(azure_endpoint, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+        with urlrequest.urlopen(req, timeout=90) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        parsed = _safe_json_loads(content)
+        if not parsed:
+            logger.warning("GPT extraction returned non-JSON content; using rule-based discovery response.")
+        return parsed
+    except Exception as exc:
+        logger.warning(f"GPT extraction failed; using rule-based discovery response. Reason: {exc}")
+        return None
+
+
+def _merge_llm_overlay(base: Dict[str, Any], overlay: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not overlay:
+        base["llm_summary"] = base.get("llm_summary") or "Rule-based extraction used; GPT extraction was unavailable."
+        return base
+
+    for key in [
+        "source_systems",
+        "ingestion_support",
+        "ingestion_types",
+        "file_types",
+        "delimiter_config",
+        "dq_rules",
+        "pipeline_capabilities",
+        "reformatted_config",
+        "llm_summary",
+    ]:
+        value = overlay.get(key)
+        if value not in (None, "", [], {}):
+            base[key] = value
+    base["llm_summary"] = base.get("llm_summary") or "GPT extraction completed."
+    return base
+
+
 async def analyze_pipeline_live(
     client_name: str,
     providers: Optional[str] = None,
     target: Optional[str] = None,
+    auth_mode: Optional[str] = None,
+    credentials: Optional[Dict[str, Any]] = None,
+    use_cloud_llm: bool = True,
+    llm_provider: str = "gpt",
     use_local_llm: bool = False,
     scan_mode: str = "live",
     authorization_token: Optional[str] = None,
@@ -132,9 +226,11 @@ async def analyze_pipeline_live(
     Runs live cloud scan and extracts DEA capabilities.
     Fallback to local analysis if cloud scan fails or returns empty.
     """
-    settings = DummySettings()
+    settings = DummySettings(credentials)
     target_key = _normalize_target(target, providers)
     provider_list = [p.strip().lower() for p in providers.split(",")] if providers else [target_key]
+    resolved_auth_mode = auth_mode or ("sso" if target_key == "fabric" else "credentials")
+    scan_status = "success"
 
     live_data = None
     try:
@@ -146,9 +242,11 @@ async def analyze_pipeline_live(
         )
     except Exception as e:
         logger.warning(f"Live scan failed: {e}. Using rule-based fallback.")
+        scan_status = "partial"
 
     if not live_data or not _flatten_assets(live_data):
         live_data = _fallback_raw_assets(target_key)
+        scan_status = "partial"
 
     combined_text = json.dumps(live_data).lower() if live_data else ""
     
@@ -215,6 +313,16 @@ async def analyze_pipeline_live(
         "streaming": streaming,
         "batch": batch,
     }
+    ingestion_types = [k for k, v in ingestion_support.items() if v]
+    source_systems = [
+        {
+            "name": asset.get("name"),
+            "type": asset.get("type"),
+            "configuration": asset.get("configuration", {}),
+        }
+        for asset in discovered_assets
+        if any(token in f"{asset.get('type')} {asset.get('name')} {asset.get('configuration')}".lower() for token in ["s3", "storage", "api", "lakehouse", "blob", "adls"])
+    ]
     dq_rules = {
         "schema_validation": schema_val or True,
         "null_check": null_check or True,
@@ -225,7 +333,8 @@ async def analyze_pipeline_live(
         "bronze": True,
         "silver": True,
         "gold": True,
-        "local_llm_requested": bool(use_local_llm),
+        "cloud_llm_requested": bool(use_cloud_llm),
+        "llm_provider": llm_provider,
         "scan_mode": scan_mode,
     }
     reformatted_config = _build_config(client_name, target_key, file_types, delimiter_config, discovered_assets)
@@ -236,19 +345,31 @@ async def analyze_pipeline_live(
         "supported_modes": [k for k, v in ingestion_support.items() if v],
     }
 
-    return {
+    result = {
         "framework": detected_framework,
+        "auth_mode": resolved_auth_mode,
+        "scan_status": scan_status,
+        "discovered_assets": discovered_assets,
+        "data_pipelines": data_pipelines,
+        "source_systems": source_systems,
         "ingestion_support": ingestion_support,
+        "ingestion_types": ingestion_types,
         "file_types": file_types,
         "delimiter_config": delimiter_config,
         "dq_rules": dq_rules,
         "pipeline_capabilities": pipeline_capabilities,
         "interactive_flow": flow,
-        "discovered_assets": discovered_assets,
-        "data_pipelines": data_pipelines,
         "ingestion_details": ingestion_details,
         "original_config": live_data or {},
         "reformatted_config": reformatted_config,
+        "llm_summary": "",
         "loading_flow": flow,
         "raw_analysis": {"scanned_cloud_assets": len(discovered_assets)}
     }
+
+    if use_cloud_llm and llm_provider == "gpt":
+        result = _merge_llm_overlay(result, _cloud_llm_extract(result))
+    else:
+        result["llm_summary"] = "GPT extraction not requested; rule-based extraction used."
+
+    return result

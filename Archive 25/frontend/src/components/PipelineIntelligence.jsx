@@ -38,7 +38,7 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [target, setTarget] = useState(initialData?.ingestion_details?.target || 'aws');
-  const [useLocalLlm, setUseLocalLlm] = useState(false);
+  const [useCloudLlm, setUseCloudLlm] = useState(true);
 
   const handleScan = async () => {
     if (!clientName) {
@@ -54,8 +54,11 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
       const result = await executeLiveScan({
         client_name: clientName,
         target,
-        use_local_llm: useLocalLlm,
         scan_mode: 'live',
+        auth_mode: target === 'fabric' ? 'sso' : 'credentials',
+        credentials: {},
+        use_cloud_llm: useCloudLlm,
+        llm_provider: 'gpt',
       });
 
       setData(result);
@@ -95,8 +98,8 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
       </div>
 
       <label className="pi-checkbox-row">
-        <input type="checkbox" checked={useLocalLlm} onChange={(e) => setUseLocalLlm(e.target.checked)} />
-        <span>Use Local LLM after scan</span>
+        <input type="checkbox" checked={useCloudLlm} onChange={(e) => setUseCloudLlm(e.target.checked)} />
+        <span>Use GPT API to extract ingestion, source, and DQ rules</span>
       </label>
 
       <div className="pi-scan-trigger">
@@ -134,6 +137,9 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
             <div className="pi-card">
               <div className="pi-card-title"><FiCpu /> Detected Framework</div>
               <div className="pi-card-content pi-framework">{data.framework || 'Unknown'}</div>
+              <div className="pi-card-content" style={{ marginTop: 8, fontSize: 12 }}>
+                Status: {data.scan_status || 'success'} · Auth: {data.auth_mode || 'credentials'}
+              </div>
             </div>
 
             <div className="pi-card">
@@ -192,6 +198,13 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
             </div>
           </div>
 
+          {data.llm_summary && (
+            <div className="pi-card">
+              <div className="pi-card-title">GPT Summary</div>
+              <div className="pi-card-content">{data.llm_summary}</div>
+            </div>
+          )}
+
           <div className="pi-card">
             <div className="pi-card-title"><FiArrowRight /> Interactive Flow</div>
             <div className="pi-card-content">
@@ -207,6 +220,10 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
           </div>
 
           <div className="pi-section-grid">
+            <div className="pi-card">
+              <div className="pi-card-title">Source Systems</div>
+              <JsonBlock value={data.source_systems || []} />
+            </div>
             <div className="pi-card">
               <div className="pi-card-title">Discovered Assets</div>
               <JsonBlock value={data.discovered_assets || []} />

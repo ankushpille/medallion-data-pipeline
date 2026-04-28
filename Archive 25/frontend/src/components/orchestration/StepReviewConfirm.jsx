@@ -40,6 +40,8 @@ export default function StepReviewConfirm({
       ? {
           framework: intelligenceData.framework,
           target: intelligenceData.ingestion_details?.target,
+          auth_mode: intelligenceData.auth_mode,
+          scan_status: intelligenceData.scan_status,
           source_path: intelligenceData.ingestion_details?.source_path,
         }
       : null,
@@ -65,6 +67,8 @@ export default function StepReviewConfirm({
         <div className="dq-config-summary">
           <SummaryChip label="Client" value={selectedClient} />
           <SummaryChip label="Framework" value={intelligenceData?.framework} />
+          <SummaryChip label="Auth" value={intelligenceData?.auth_mode} />
+          <SummaryChip label="Scan" value={intelligenceData?.scan_status} />
           <SummaryChip label="Source" value={sourceType} />
           <SummaryChip label="Endpoint" value={folderPath} />
         </div>
@@ -73,6 +77,10 @@ export default function StepReviewConfirm({
           <div className="pi-card">
             <div className="pi-card-title"><FiDatabase /> Ingestion Support by Framework</div>
             <JsonBlock value={intelligenceData?.ingestion_support} />
+          </div>
+          <div className="pi-card">
+            <div className="pi-card-title">Source Systems</div>
+            <JsonBlock value={intelligenceData?.source_systems || []} />
           </div>
           <div className="pi-card">
             <div className="pi-card-title"><FiFile /> File Types</div>
@@ -92,6 +100,13 @@ export default function StepReviewConfirm({
           <div className="pi-card-title">Generated Config</div>
           <JsonBlock value={intelligenceData?.reformatted_config} />
         </div>
+
+        {intelligenceData?.llm_summary && (
+          <div className="pi-card">
+            <div className="pi-card-title">GPT Summary</div>
+            <div className="pi-card-content">{intelligenceData.llm_summary}</div>
+          </div>
+        )}
 
         <div className="pi-card">
           <div className="pi-card-title">Execution Payload Preview</div>

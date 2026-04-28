@@ -1221,6 +1221,84 @@
   margin: 0 auto;
 }
 
+.cloud-scan-modal {
+  width: 760px;
+  max-width: 95vw;
+}
+
+.cloud-scan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.cloud-scan-portals {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.cloud-scan-portal {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 800;
+  color: var(--text2);
+  cursor: pointer;
+}
+
+.cloud-scan-portal.selected {
+  border-color: var(--blue);
+  background: rgba(25, 118, 210, 0.08);
+  color: var(--blue);
+}
+
+.cloud-scan-body {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface2);
+}
+
+.cloud-scan-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cloud-scan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text2);
+}
+
+.cloud-scan-sso {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cloud-scan-llm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text2);
+}
+
 /* Shared Step Panel */
 .orch-step-panel {
   background: rgba(255,255,255,0.65);

@@ -719,6 +719,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   call={call}
                   refreshTrigger={localRefreshTrigger}
                   intelligenceData={intelligenceData}
+                  setIntelligenceData={setIntelligenceData}
                   onNext={() => { setStep(4); }}
                 />
               )}
