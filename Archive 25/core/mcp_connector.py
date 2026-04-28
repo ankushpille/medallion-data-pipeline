@@ -9,8 +9,48 @@ from enum import Enum
 from loguru import logger
 from core.utils import parse_s3_url
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+except ImportError:
+    ClientSession = None
+    StdioServerParameters = None
+    stdio_client = None
+
+
+def _build_search_path(client_name: str, folder_path: str) -> str:
+    """
+    Builds the full ADLS search path without requiring the optional MCP server
+    module to be importable during normal backend startup.
+    """
+    root = os.getenv("ADLS_ROOT_FOLDER", "").strip("/")
+    fp = (folder_path or "").strip("/")
+
+    if root and fp.startswith(root + "/"):
+        return fp
+
+    if client_name and fp.startswith(client_name + "/"):
+        return "/".join([root, fp]) if root else fp
+
+    parts = [p for p in [root, client_name, folder_path] if p and str(p).strip("/")]
+    return "/".join(parts)
+
+
+def _normalize_path(full_path: str, client_name: str, source_type: str) -> str:
+    """
+    Strips the ADLS root and client prefix from a full blob path. Kept local so
+    direct S3/ADLS connectors do not depend on the optional MCP package.
+    """
+    root = os.getenv("ADLS_ROOT_FOLDER", "").strip("/")
+    if root:
+        root_prefix = root + "/"
+        if full_path.startswith(root_prefix):
+            full_path = full_path[len(root_prefix):]
+
+    client_prefix = f"{client_name}/"
+    if full_path.startswith(client_prefix):
+        full_path = full_path[len(client_prefix):]
+    return full_path
 
 # ---------------------------------------------------------
 # CONSTANTS & CONFIG
@@ -74,6 +114,11 @@ class MCPBridge:
     Manages the connection to the MCP Server process.
     """
     def __init__(self):
+        if not (ClientSession and StdioServerParameters and stdio_client):
+            raise RuntimeError(
+                "MCP package is not installed. Install requirements.txt or use "
+                "ADLS/S3/LOCAL connectors, which do not require MCP."
+            )
         
         self.server_script = os.path.join(os.getcwd(), "core", "mcp_server.py")
         
@@ -245,7 +290,6 @@ class S3Connector(MCPSourceConnector):
             db.close()
 
     def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
-        from core.mcp_server import _normalize_path
         logger.info(f"S3 Connector: Requesting list_datasets for {client_name} via Direct API")
         
         try:
@@ -285,7 +329,6 @@ class S3Connector(MCPSourceConnector):
             raise RuntimeError(f"S3Connector get_file_content failed for {file_path_canonical}: {e}")
 
     def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
-        from core.mcp_server import _normalize_path
         logger.info(f"S3 Connector: Requesting list_children for {folder_path} via Direct API")
         
         try:
@@ -332,7 +375,6 @@ class ADLSConnector(MCPSourceConnector):
 
     def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
         from core.azure_storage import AzureStorageClient
-        from core.mcp_server import _normalize_path
         storage = AzureStorageClient()
         
         logger.info(f"ADLS Connector: Requesting list_datasets for {client_name} via Direct API")
@@ -381,7 +423,6 @@ class ADLSConnector(MCPSourceConnector):
         if file_path_canonical and file_path_canonical.startswith("az://"):
             container, key = storage.parse_az_url(file_path_canonical)
         else:
-            from core.mcp_server import _build_search_path
             key = _build_search_path(client_name, file_path_canonical)
             
         container = container or os.getenv("ADLS_CONTAINER_NAME", "ag-de-agent")
@@ -394,7 +435,6 @@ class ADLSConnector(MCPSourceConnector):
 
     def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
         from core.azure_storage import AzureStorageClient
-        from core.mcp_server import _normalize_path
         storage = AzureStorageClient()
         
         logger.info(f"ADLS Connector: Requesting list_children for {folder_path} via Direct API")

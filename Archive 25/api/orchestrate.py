@@ -15,7 +15,17 @@ from datetime import datetime
 router = APIRouter(prefix="/orchestrate", tags=["LangGraph Orchestration"])
 
 
-from langfuse import observe
+try:
+    from langfuse import observe
+except ImportError:
+    def observe(*args, **kwargs):
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def _decorator(fn):
+            return fn
+
+        return _decorator
 
 @observe()
 def _run_pipeline_for_client(client_name: str, db: Session) -> dict:
