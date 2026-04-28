@@ -70,6 +70,8 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
       }
       if (!hasCredentials && target !== 'fabric') authMode = 'none';
       if (target === 'fabric' && !hasCredentials) authMode = 'none';
+      const hasAwsKeys = target !== 'aws' || (requestCredentials.access_key && requestCredentials.secret_key);
+      const scanMode = hasCredentials && hasAwsKeys ? 'real' : 'mock';
 
       const response = await fetch(apiUrl('/discovery/analyze'), {
         method: 'POST',
@@ -77,7 +79,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         body: JSON.stringify({
           client_name: selectedClient,
           target,
-          scan_mode: 'live',
+          scan_mode: scanMode,
           auth_mode: authMode,
           credentials: requestCredentials,
           use_cloud_llm: useCloudLlm,

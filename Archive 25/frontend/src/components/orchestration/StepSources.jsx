@@ -11,11 +11,13 @@ export default function StepSources({
   selectedEndpoint, setSelectedEndpoint,
   sourceType, setSourceType, setFolderPath,
   setShowUploadModal, openExplorer, onNext, call,
-  refreshTrigger, intelligenceData
+  refreshTrigger, intelligenceData, configPersisted, setConfigPersisted, toast
 }) {
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
   const [selectedLocalFiles, setSelectedLocalFiles] = useState([]);
+  const [savingGeneratedConfig, setSavingGeneratedConfig] = useState(false);
+  const [saveGeneratedError, setSaveGeneratedError] = useState('');
 
   useEffect(() => {
     if (selectedClient) {
@@ -116,6 +118,47 @@ export default function StepSources({
     { key: 'batch', label: 'Batch' },
   ];
 
+  async function saveIntelligenceConfigAndContinue() {
+    if (!intelligenceData) {
+      onNext();
+      return;
+    }
+    if (intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || intelligenceData.auth_mode === 'none' || intelligenceData.pipeline_capabilities?.scan_mode === 'mock') {
+      const msg = 'Please perform a real scan using credentials before execution.';
+      setSaveGeneratedError(msg);
+      toast?.(msg, 'error');
+      return;
+    }
+
+    setSavingGeneratedConfig(true);
+    setSaveGeneratedError('');
+    try {
+      console.debug('Saving intelligenceData before Step 4', {
+        framework: intelligenceData.framework,
+        scan_status: intelligenceData.scan_status,
+        auth_mode: intelligenceData.auth_mode,
+        is_fallback: intelligenceData.is_fallback,
+        source_path: detectedSourcePath,
+      });
+      const response = await call('/config/save', 'POST', {
+        client_name: selectedClient,
+        intelligence_data: intelligenceData,
+        source_type: detectedSourceType,
+        source_path: detectedSourcePath,
+      });
+      console.debug('Config save API response', response);
+      setConfigPersisted?.(true);
+      toast?.(`Saved ${response.rows_inserted || 0} configuration row(s)`, 'success');
+      onNext();
+    } catch (e) {
+      const msg = e?.message || 'Failed to save generated configuration';
+      setSaveGeneratedError(msg);
+      toast?.(msg, 'error');
+    } finally {
+      setSavingGeneratedConfig(false);
+    }
+  }
+
   const renderScanDrivenSources = () => (
     <div className="step-body">
       <div style={{ marginBottom: 20, padding: 12, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, color: '#047857' }}>
@@ -191,12 +234,14 @@ export default function StepSources({
       </div>
 
       <div className="step-footer">
+        {saveGeneratedError && <div className="panel-error-alert" style={{ marginRight: 'auto' }}>{saveGeneratedError}</div>}
+        {configPersisted && <div className="config-chip" style={{ marginRight: 'auto' }}><strong>Config:</strong> Saved</div>}
         <button
           className="orch-btn primary step-next-btn"
-          disabled={!detectedSourcePath}
-          onClick={() => onNext()}
+          disabled={!detectedSourcePath || savingGeneratedConfig || intelligenceData?.is_fallback || intelligenceData?.scan_status === 'failed' || intelligenceData?.auth_mode === 'none' || intelligenceData?.pipeline_capabilities?.scan_mode === 'mock'}
+          onClick={saveIntelligenceConfigAndContinue}
         >
-          Continue to Configuration →
+          {savingGeneratedConfig ? 'Saving Config...' : 'Continue to Configuration →'}
         </button>
       </div>
     </div>

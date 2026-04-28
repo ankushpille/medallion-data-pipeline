@@ -128,23 +128,111 @@ class S3Connector(MCPSourceConnector):
         import boto3
         from core.database import SessionLocal
         from models.api_source_config import APISourceConfig
+        from models.master_config_authoritative import MasterConfigAuthoritative
+        from core.credential_registry import get_aws_credentials
         
         bucket, prefix = parse_s3_url(folder_path)
 
         db = SessionLocal()
         try:
             # First try finding by bucket name if we have it
-            query = db.query(APISourceConfig).filter(APISourceConfig.source_type == "S3")
+            query = db.query(APISourceConfig).filter(
+                APISourceConfig.source_type == "S3",
+                APISourceConfig.is_active == True,
+            )
             if bucket:
-                config = query.filter(APISourceConfig.aws_bucket_name == bucket).first()
+                config = query.filter(
+                    APISourceConfig.client_name == client_name,
+                    APISourceConfig.aws_bucket_name == bucket,
+                ).first() or query.filter(APISourceConfig.aws_bucket_name == bucket).first()
             else:
                 # Fallback to finding by client name
                 config = query.filter(APISourceConfig.client_name == client_name).first()
                 if config:
                     bucket = config.aws_bucket_name
+                    if not prefix and config.endpoints:
+                        prefix = config.endpoints.strip("/")
+            
+            if not config and bucket:
+                mc = db.query(MasterConfigAuthoritative).filter(
+                    MasterConfigAuthoritative.client_name == client_name,
+                    MasterConfigAuthoritative.source_type == "S3",
+                    MasterConfigAuthoritative.source_folder.like(f"s3://{bucket}%"),
+                    MasterConfigAuthoritative.is_active == True,
+                ).first()
+                if mc:
+                    logger.info(f"S3Connector registry fallback matched master config for client={client_name}, bucket={bucket}")
+                    config = APISourceConfig(
+                        client_name=client_name,
+                        source_name=f"{bucket}-derived",
+                        source_type="S3",
+                        aws_bucket_name=bucket,
+                        aws_region="us-east-1",
+                        endpoints=prefix,
+                        is_active=True,
+                    )
+            elif not config and not bucket:
+                mc = db.query(MasterConfigAuthoritative).filter(
+                    MasterConfigAuthoritative.client_name == client_name,
+                    MasterConfigAuthoritative.source_type == "S3",
+                    MasterConfigAuthoritative.is_active == True,
+                ).first()
+                if mc and mc.source_folder:
+                    bucket, prefix = parse_s3_url(mc.source_folder)
+                    logger.info(f"S3Connector derived bucket from master config. client={client_name}, bucket={bucket}, prefix={prefix}")
+                    config = query.filter(
+                        APISourceConfig.client_name == client_name,
+                        APISourceConfig.aws_bucket_name == bucket,
+                    ).first() or APISourceConfig(
+                        client_name=client_name,
+                        source_name=f"{bucket}-derived",
+                        source_type="S3",
+                        aws_bucket_name=bucket,
+                        aws_region="us-east-1",
+                        endpoints=prefix,
+                        is_active=True,
+                    )
             
             if not config:
                 raise RuntimeError(f"No S3 configuration found for client '{client_name}' or bucket '{bucket}' in registry.")
+
+            logger.info(f"S3Connector registry lookup: client={client_name}, bucket={bucket}, found_config={bool(config)}, auth_type={getattr(config, 'auth_type', None)}")
+
+            transient = get_aws_credentials(client_name, bucket)
+            if transient:
+                logger.info(f"S3Connector using transient in-memory AWS credentials for client={client_name}, bucket={bucket}")
+                if transient.get("role_arn"):
+                    base = boto3.client(
+                        'sts',
+                        aws_access_key_id=transient.get("aws_access_key_id"),
+                        aws_secret_access_key=transient.get("aws_secret_access_key"),
+                        aws_session_token=transient.get("aws_session_token"),
+                        region_name=transient.get("region_name") or config.aws_region or "us-east-1"
+                    )
+                    assumed = base.assume_role(RoleArn=transient["role_arn"], RoleSessionName="dea-s3-orchestration")
+                    temp = assumed["Credentials"]
+                    s3 = boto3.client(
+                        's3',
+                        aws_access_key_id=temp["AccessKeyId"],
+                        aws_secret_access_key=temp["SecretAccessKey"],
+                        aws_session_token=temp["SessionToken"],
+                        region_name=transient.get("region_name") or config.aws_region or "us-east-1"
+                    )
+                    return s3, bucket, prefix
+                s3 = boto3.client(
+                    's3',
+                    aws_access_key_id=transient.get("aws_access_key_id"),
+                    aws_secret_access_key=transient.get("aws_secret_access_key"),
+                    aws_session_token=transient.get("aws_session_token"),
+                    region_name=transient.get("region_name") or config.aws_region or "us-east-1"
+                )
+                return s3, bucket, prefix
+
+            if not config.aws_access_key or not config.aws_secret_key:
+                raise RuntimeError(
+                    f"S3 configuration found for client '{client_name}' and bucket '{bucket}', "
+                    "but credentials are transient and not available in this backend process. Re-run the real AWS scan."
+                )
             
             s3 = boto3.client(
                 's3',

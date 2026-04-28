@@ -66,6 +66,7 @@ def run(
     folder_path:  Optional[str]  = None,
     batch_id:     Optional[str]  = None,
     stream:       bool           = True,
+    require_real_scan: bool      = False,
     db:           Session        = Depends(get_db),
 ):
     """
@@ -83,6 +84,29 @@ def run(
         raise HTTPException(status_code=400, detail="client_name is required")
 
     src = source_type.upper().strip()
+    if require_real_scan:
+        from models.master_config import MasterConfig
+        configs = db.query(MasterConfig).filter(
+            MasterConfig.client_name == client_name,
+            MasterConfig.is_active == True,
+        ).all()
+        logger.info(f"Execution validation: client={client_name}, require_real_scan={require_real_scan}, config_rows={len(configs)}")
+        if not configs:
+            raise HTTPException(status_code=400, detail="Configuration must be saved before execution.")
+        has_real_scan = False
+        for cfg in configs:
+            rules = cfg.validation_rules or {}
+            caps = rules.get("pipeline_capabilities") or {}
+            if (
+                rules.get("scan_status") in ("success", "partial")
+                and rules.get("auth_mode") not in (None, "", "none")
+                and not rules.get("is_fallback")
+                and caps.get("scan_mode") != "mock"
+            ):
+                has_real_scan = True
+                break
+        if not has_real_scan:
+            raise HTTPException(status_code=400, detail="Please perform a real scan using credentials before execution.")
 
     # All sources — go through full LangGraph orchestration
     if not folder_path and src not in ("LOCAL", "S3"):

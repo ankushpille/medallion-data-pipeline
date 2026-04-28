@@ -62,6 +62,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [localRefreshTrigger, setLocalRefreshTrigger] = useState(0);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
   const [intelligenceData, setIntelligenceData] = useState(null);
+  const [configPersisted, setConfigPersisted] = useState(false);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
@@ -207,6 +208,20 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   // Orchestration
   async function runOrchestration() {
     if (!selectedClient) return toast('Select a client first', 'error');
+    if (!intelligenceData || intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || intelligenceData.auth_mode === 'none' || intelligenceData.pipeline_capabilities?.scan_mode === 'mock') {
+      console.debug('Execution validation failed', {
+        hasIntelligence: !!intelligenceData,
+        is_fallback: intelligenceData?.is_fallback,
+        scan_status: intelligenceData?.scan_status,
+        auth_mode: intelligenceData?.auth_mode,
+        scan_mode: intelligenceData?.pipeline_capabilities?.scan_mode,
+      });
+      return toast('Please perform a real scan using credentials before execution.', 'error');
+    }
+    if (!configPersisted) {
+      console.debug('Execution validation failed: config not persisted');
+      return toast('Save generated configuration before execution.', 'error');
+    }
     if (!sourceType) return toast('Specify source_type', 'error');
     if (!folderPath) return toast('Specify folder_path', 'error');
 
@@ -215,7 +230,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setIsOrchestrating(true);
     try {
       toast('Running orchestration — streaming progress...', 'info');
-      const qs = `?source_type=${encodeURIComponent(sourceType)}&client_name=${encodeURIComponent(selectedClient)}&folder_path=${encodeURIComponent(folderPath)}`;
+      const qs = `?source_type=${encodeURIComponent(sourceType)}&client_name=${encodeURIComponent(selectedClient)}&folder_path=${encodeURIComponent(folderPath)}&require_real_scan=true`;
       const response = await fetch(apiUrl(`/orchestrate/run${qs}`), {
         method: 'POST',
         headers: { 'Accept': 'application/x-ndjson' }
@@ -697,6 +712,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   initialData={intelligenceData}
                   onScanComplete={(data) => {
                     setIntelligenceData(data);
+                    setConfigPersisted(false);
                     const details = data?.ingestion_details || data?.reformatted_config || {};
                     if (details.source_type) setSourceType(details.source_type);
                     if (details.source_path) {
@@ -706,7 +722,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     }
                   }}
                   onConfirm={(data) => {
-                    if (data) setIntelligenceData(data);
+                    if (data) {
+                      setIntelligenceData(data);
+                      setConfigPersisted(false);
+                    }
                     setStep(3);
                   }}
                 />
@@ -730,6 +749,9 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   call={call}
                   refreshTrigger={localRefreshTrigger}
                   intelligenceData={intelligenceData}
+                  configPersisted={configPersisted}
+                  setConfigPersisted={setConfigPersisted}
+                  toast={toast}
                   onNext={() => { setStep(4); }}
                 />
               )}
@@ -751,6 +773,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   sourceType={sourceType}
                   folderPath={folderPath}
                   intelligenceData={intelligenceData}
+                  configPersisted={configPersisted}
                   onBack={() => setStep(4)}
                   onConfirm={runOrchestration}
                   isOrchestrating={isOrchestrating}

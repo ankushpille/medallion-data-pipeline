@@ -28,6 +28,13 @@ export default function StepConfig({
     try {
       await syncMasterConfig();
       const res = await call(`/orchestrate/master-config?client_name=${encodeURIComponent(selectedClient)}&source_type=${encodeURIComponent(sourceType || '')}&dataset_ids=${encodeURIComponent(folderPath || '')}`);
+      console.debug('Master config fetch response', {
+        client_name: selectedClient,
+        sourceType,
+        folderPath,
+        rows: res?.config?.length || 0,
+        message: res?.message,
+      });
       
       // Auto-fill logic from Intelligence Scan
       let loadedConfig = res.config || [];

@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List
 from urllib import request as urlrequest
 
 from engine.scanner.manager import scanner_manager
+from core.credential_registry import put_aws_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,21 @@ def _first_s3_source_path(assets: List[Dict[str, Any]]) -> str:
             prefix = prefixes[0] if prefixes else ""
             return f"s3://{bucket}/{prefix}".rstrip("/")
     return ""
+
+
+def _s3_bucket_from_path(path: str) -> str:
+    if not path or not path.startswith("s3://"):
+        return ""
+    return path.split("s3://", 1)[1].split("/", 1)[0]
+
+
+def _aws_region_from_assets(assets: List[Dict[str, Any]]) -> str:
+    for asset in assets:
+        if asset.get("type") == "s3":
+            region = (asset.get("configuration") or {}).get("Region")
+            if region:
+                return region
+    return "us-east-1"
 
 
 def _build_config(client_name: str, target: str, file_types: List[str], delimiter_config: Dict[str, Any], assets: List[Dict[str, Any]], allow_demo_defaults: bool = True) -> Dict[str, Any]:
@@ -454,5 +470,9 @@ async def analyze_pipeline_live(
         result.setdefault("ingestion_details", {})
         result["ingestion_details"]["source_type"] = "S3"
         result["ingestion_details"]["source_path"] = real_source_path
+        bucket = _s3_bucket_from_path(real_source_path)
+        if bucket:
+            put_aws_credentials(client_name, bucket, credentials or {}, _aws_region_from_assets(discovered_assets))
+            logger.info("Cached transient AWS scan credentials for client=%s bucket=%s", client_name, bucket)
 
     return result

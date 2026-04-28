@@ -24,6 +24,7 @@ export default function StepReviewConfirm({
   sourceType,
   folderPath,
   intelligenceData,
+  configPersisted,
   onBack,
   onConfirm,
   isOrchestrating,
@@ -47,6 +48,12 @@ export default function StepReviewConfirm({
         }
       : null,
   };
+  const canExecute = !!intelligenceData
+    && !intelligenceData.is_fallback
+    && intelligenceData.scan_status !== 'failed'
+    && intelligenceData.auth_mode !== 'none'
+    && intelligenceData.pipeline_capabilities?.scan_mode !== 'mock'
+    && !!configPersisted;
 
   return (
     <motion.div
@@ -71,6 +78,7 @@ export default function StepReviewConfirm({
           <SummaryChip label="Auth" value={intelligenceData?.auth_mode} />
           <SummaryChip label="Scan" value={intelligenceData?.scan_status} />
           <SummaryChip label="Fallback" value={intelligenceData?.is_fallback ? 'Yes' : 'No'} />
+          <SummaryChip label="Config Saved" value={configPersisted ? 'Yes' : 'No'} />
           <SummaryChip label="Source" value={sourceType} />
           <SummaryChip label="Endpoint" value={folderPath} />
         </div>
@@ -121,13 +129,18 @@ export default function StepReviewConfirm({
         <button
           className="orch-btn primary step-next-btn"
           onClick={onConfirm}
-          disabled={isOrchestrating || !selectedClient || !sourceType || !folderPath}
+          disabled={isOrchestrating || !selectedClient || !sourceType || !folderPath || !canExecute}
           style={{ minWidth: 240, fontWeight: 800 }}
         >
           <FiCheck style={{ marginRight: 8 }} />
           {isOrchestrating ? 'Pushing...' : 'Confirm & Push to DEA Agent'}
         </button>
       </div>
+      {!canExecute && (
+        <div className="panel-error-alert" style={{ marginTop: 12 }}>
+          Please perform a real scan using credentials and save configuration before execution.
+        </div>
+      )}
     </motion.div>
   );
 }
