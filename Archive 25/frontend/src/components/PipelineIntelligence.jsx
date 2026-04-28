@@ -17,6 +17,13 @@ function JsonBlock({ value }) {
   );
 }
 
+function hasJsonValue(value) {
+  if (!value) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
 function Tag({ active, children }) {
   return <span className={`pi-tag ${active === false ? 'inactive' : 'active'}`}>{children}</span>;
 }
@@ -229,7 +236,15 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
             </div>
             <div className="pi-card">
               <div className="pi-card-title">Original Config JSON</div>
-              <JsonBlock value={data.original_config || {}} />
+              {hasJsonValue(data.original_config) ? (
+                <JsonBlock value={data.original_config} />
+              ) : (
+                <div className="pi-card-content">Original Fabric pipeline JSON not provided or could not be extracted from Fabric API.</div>
+              )}
+            </div>
+            <div className="pi-card">
+              <div className="pi-card-title">Raw Cloud Scan JSON</div>
+              <JsonBlock value={data.raw_cloud_scan || { raw_cloud_dump: data.raw_cloud_dump || [] }} />
             </div>
             <div className="pi-card pi-wide">
               <div className="pi-card-title">Reformatted Config JSON</div>

@@ -182,6 +182,266 @@ def _build_config(client_name: str, target: str, file_types: List[str], delimite
     }
 
 
+def _find_first_key(value: Any, wanted: str) -> Any:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key == wanted:
+                return nested
+            found = _find_first_key(nested, wanted)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_first_key(item, wanted)
+            if found is not None:
+                return found
+    return None
+
+
+def _fabric_item_name(item: Dict[str, Any]) -> str:
+    raw = str(item.get("id") or item.get("name") or "FabricPipeline")
+    return raw.split(" || ", 1)[1] if " || " in raw else raw
+
+
+def _extract_fabric_definition_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    config = item.get("configuration") or {}
+    definition = config.get("Definition") or config.get("definition") or {}
+    if not isinstance(definition, dict):
+        return {}
+
+    # Fabric getDefinition usually returns decoded parts keyed by path, such as
+    # pipeline-content.json. Keep this generic because tenant responses vary.
+    candidates: List[Any] = []
+    for key, value in definition.items():
+        key_l = str(key).lower()
+        if any(token in key_l for token in ["pipeline-content", "pipeline", "content"]):
+            candidates.append(value)
+    candidates.extend(definition.values())
+    candidates.append(definition)
+
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            if isinstance(candidate.get("properties"), dict):
+                return candidate
+            nested_props = _find_first_key(candidate, "properties")
+            if isinstance(nested_props, dict):
+                return {"properties": nested_props}
+            activities = _find_first_key(candidate, "activities")
+            if isinstance(activities, list):
+                return {"properties": {"activities": activities}}
+    return {}
+
+
+def _collect_fabric_pipeline_items(raw_cloud_scan: Any) -> List[Dict[str, Any]]:
+    pipelines: List[Dict[str, Any]] = []
+    for item in _collect_list(raw_cloud_scan, "fabric_items"):
+        if not isinstance(item, dict):
+            continue
+        config = item.get("configuration") or {}
+        item_type = str(config.get("Type") or item.get("type") or "").lower()
+        if item_type in {"pipeline", "datapipeline", "data pipeline"} or "pipeline" in item_type:
+            pipelines.append(item)
+    return pipelines
+
+
+def _fabric_original_config_from_scan(raw_cloud_scan: Any) -> Dict[str, Any]:
+    resources: List[Dict[str, Any]] = []
+    for item in _collect_fabric_pipeline_items(raw_cloud_scan):
+        definition = _extract_fabric_definition_from_item(item)
+        if not definition:
+            continue
+
+        config = item.get("configuration") or {}
+        pipeline_name = (
+            definition.get("name")
+            or config.get("Name")
+            or config.get("DisplayName")
+            or _fabric_item_name(item)
+        )
+        properties = definition.get("properties") if isinstance(definition.get("properties"), dict) else {}
+        if not properties:
+            properties = {k: v for k, v in definition.items() if k not in {"name", "type"}}
+
+        resources.append({
+            "name": pipeline_name,
+            "type": "pipelines",
+            "apiVersion": "2018-06-01",
+            "properties": properties,
+            "metadata": {
+                "workspaceId": config.get("WorkspaceId"),
+                "itemId": config.get("ItemId"),
+                "fabricItemType": config.get("Type"),
+            },
+        })
+
+    if not resources:
+        return {}
+
+    return {
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {},
+        "variables": {},
+        "resources": resources,
+    }
+
+
+def _flatten_fabric_activities(activities: Any) -> List[Dict[str, Any]]:
+    flat: List[Dict[str, Any]] = []
+    if not isinstance(activities, list):
+        return flat
+    for activity in activities:
+        if not isinstance(activity, dict):
+            continue
+        flat.append(activity)
+        props = activity.get("typeProperties") or {}
+        for nested_key in ["activities", "ifTrueActivities", "ifFalseActivities"]:
+            flat.extend(_flatten_fabric_activities(props.get(nested_key)))
+    return flat
+
+
+def _fabric_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    try:
+        return json.dumps(value, default=str)
+    except Exception:
+        return str(value)
+
+
+def _fabric_activity_flow(resources: List[Dict[str, Any]]) -> List[str]:
+    names: List[str] = []
+    seen = set()
+    for resource in resources:
+        activities = _flatten_fabric_activities((resource.get("properties") or {}).get("activities"))
+        for activity in activities:
+            name = str(activity.get("name") or activity.get("type") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def _fabric_rule_extract(client_name: str, original_config: Dict[str, Any], raw_cloud_scan: Any, delimiter_config: Dict[str, Any]) -> Dict[str, Any]:
+    resources = original_config.get("resources") if isinstance(original_config, dict) else []
+    resources = resources if isinstance(resources, list) else []
+    activities = []
+    for resource in resources:
+        activities.extend(_flatten_fabric_activities((resource.get("properties") or {}).get("activities")))
+
+    all_text = json.dumps(original_config, default=str).lower()
+    activity_types = [str(a.get("type") or "").lower() for a in activities]
+    activity_names = [str(a.get("name") or a.get("type") or "") for a in activities]
+
+    has_web = any("web" in t or "rest" in _fabric_text(a).lower() or "baseurl" in _fabric_text(a).lower() for t, a in zip(activity_types, activities))
+    has_copy = any("copy" in t for t in activity_types)
+    has_notebook = any("notebook" in t for t in activity_types)
+    has_script = any("script" in t for t in activity_types)
+    has_lookup = any("lookup" in t for t in activity_types)
+    has_email = any("email" in t or "mail" in _fabric_text(a).lower() for t, a in zip(activity_types, activities))
+    has_lakehouse = "lakehouse" in all_text
+    has_warehouse = "warehouse" in all_text or "datawarehouse" in all_text or "sql" in all_text
+    has_json = "json" in all_text
+
+    linked_services = sorted(set(str(v) for v in _collect_list(original_config, "linkedServiceName") if v))
+    source_systems = []
+    if has_web:
+        source_systems.append({"name": "Fabric pipeline REST API source", "type": "REST API", "configuration": {"detected_from": "Web activity"}})
+    if has_lookup or has_warehouse:
+        source_systems.append({"name": "Fabric DataWarehouse lookup", "type": "DataWarehouse", "configuration": {"detected_from": "Lookup/SQL activity"}})
+    if has_lakehouse:
+        source_systems.append({"name": "Fabric Lakehouse", "type": "Lakehouse", "configuration": {"detected_from": "Lakehouse dataset/activity"}})
+
+    ingestion_support = {
+        "file_based": has_lakehouse or has_json,
+        "api": has_web,
+        "database": has_lookup or has_warehouse,
+        "streaming": "eventstream" in all_text or "stream" in all_text,
+        "batch": True,
+    }
+    ingestion_types = [key for key, enabled in ingestion_support.items() if enabled]
+    file_types = ["JSON"] if has_json else []
+    if "csv" in all_text:
+        file_types.append("CSV")
+    if "parquet" in all_text:
+        file_types.append("Parquet")
+    file_types = list(dict.fromkeys(file_types))
+
+    dq_rules = {
+        "row_count_check": "row_count" in all_text or "rowcount" in all_text,
+        "failure_status_tracking": "failed" in all_text or "failure" in all_text,
+        "conditional_validation": any("ifcondition" in t or "if condition" in t for t in activity_types),
+        "schema_validation": "schema" in all_text,
+    }
+
+    flow = _fabric_activity_flow(resources) or ["Fabric DataPipeline"]
+    pipeline_name = next((r.get("name") for r in resources if r.get("name")), "Fabric DataPipeline")
+    copy_activities = [a.get("name") for a in activities if "copy" in str(a.get("type") or "").lower()]
+    notebooks = [a.get("name") for a in activities if "notebook" in str(a.get("type") or "").lower()]
+
+    reformatted_config = {
+        "client_name": client_name,
+        "source_type": "FABRIC",
+        "source_path": f"fabric://{pipeline_name}",
+        "pipeline_name": pipeline_name,
+        "activity_count": len(activities),
+        "activities": activity_names,
+        "copy_activities": [x for x in copy_activities if x],
+        "notebooks": [x for x in notebooks if x],
+        "linked_services": linked_services,
+        "file_types": file_types,
+        "delimiter_config": delimiter_config,
+        "targets": {
+            "lakehouse": has_lakehouse,
+            "warehouse": has_warehouse,
+        },
+    }
+
+    data_pipelines = [{
+        "name": resource.get("name") or "Fabric DataPipeline",
+        "type": "DataPipeline",
+        "platform": "Microsoft Fabric",
+        "activities": activity_names,
+        "activity_count": len(activity_names),
+        "configuration": resource,
+    } for resource in resources]
+
+    return {
+        "source_systems": source_systems,
+        "ingestion_support": ingestion_support,
+        "ingestion_types": ingestion_types,
+        "file_types": file_types,
+        "dq_rules": dq_rules,
+        "pipeline_capabilities": {
+            "copy_activity": has_copy,
+            "web_activity": has_web,
+            "lookup_activity": has_lookup,
+            "notebook_activity": has_notebook,
+            "script_activity": has_script,
+            "email_notifications": has_email,
+            "lakehouse": has_lakehouse,
+            "warehouse": has_warehouse,
+            "bronze": True,
+            "silver": True,
+            "gold": True,
+        },
+        "interactive_flow": flow,
+        "reformatted_config": reformatted_config,
+        "data_pipelines": data_pipelines,
+        "ingestion_details": {
+            "target": "fabric",
+            "source_type": "FABRIC",
+            "source_path": f"fabric://{pipeline_name}",
+            "supported_modes": ingestion_types,
+        },
+        "llm_summary": "Fabric pipeline definition extracted from live Fabric API and normalized for DEA.",
+    }
+
+
 def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     import re
     match = re.search(r"(\{[\s\S]*\})", text or "")
@@ -331,7 +591,17 @@ async def analyze_pipeline_live(
     elif warnings and scan_status == "success":
         scan_status = "partial"
 
-    combined_text = json.dumps(live_data).lower() if live_data else ""
+    raw_cloud_scan = live_data or {}
+    extracted_original_config: Dict[str, Any] = {}
+    if target_key == "fabric":
+        extracted_original_config = _fabric_original_config_from_scan(raw_cloud_scan)
+        if not extracted_original_config:
+            warnings.append("Pipeline definition could not be extracted from Fabric API")
+            if scan_status == "success":
+                scan_status = "partial"
+
+    extraction_source = extracted_original_config if target_key == "fabric" and extracted_original_config else raw_cloud_scan
+    combined_text = json.dumps(extraction_source).lower() if extraction_source else ""
     
     # 1. Framework detection
     detected_framework = "Microsoft Fabric" if target_key == "fabric" else "AWS Glue" if target_key == "aws" else "Azure Data Factory"
@@ -382,7 +652,7 @@ async def analyze_pipeline_live(
     
     # 6. Loading Flow
     flow = ["Source", "Raw", "Bronze", "DQ Validation", "Silver", "Gold"]
-    discovered_assets = _flatten_assets(live_data)
+    discovered_assets = _flatten_assets(raw_cloud_scan)
     data_pipelines = [
         asset for asset in discovered_assets
         if any(token in f"{asset.get('type')} {asset.get('name')} {asset.get('configuration')}".lower() for token in ["pipeline", "glue", "factory", "lambda", "function"])
@@ -450,15 +720,32 @@ async def analyze_pipeline_live(
         "pipeline_capabilities": pipeline_capabilities,
         "interactive_flow": flow,
         "ingestion_details": ingestion_details,
-        "original_config": live_data or {},
+        "original_config": extracted_original_config or {},
+        "raw_cloud_scan": raw_cloud_scan,
+        "raw_cloud_dump": raw_cloud_scan.get("raw_cloud_dump", []) if isinstance(raw_cloud_scan, dict) else [],
         "reformatted_config": reformatted_config,
         "llm_summary": "",
         "loading_flow": flow,
         "raw_analysis": {"scanned_cloud_assets": len(discovered_assets)}
     }
 
+    if target_key == "fabric" and extracted_original_config:
+        fabric_overlay = _fabric_rule_extract(client_name, extracted_original_config, raw_cloud_scan, delimiter_config)
+        for key, value in fabric_overlay.items():
+            if value not in (None, "", [], {}):
+                if key == "pipeline_capabilities":
+                    result[key] = {**result.get(key, {}), **value}
+                else:
+                    result[key] = value
+
     if use_cloud_llm and llm_provider == "gpt":
-        result = _merge_llm_overlay(result, _cloud_llm_extract(result))
+        llm_input = dict(result)
+        if target_key == "fabric":
+            llm_input["scan_result_for_extraction"] = {
+                "original_config": extracted_original_config,
+                "raw_cloud_scan": raw_cloud_scan,
+            }
+        result = _merge_llm_overlay(result, _cloud_llm_extract(llm_input))
     else:
         result["llm_summary"] = "GPT extraction not requested; rule-based extraction used."
 

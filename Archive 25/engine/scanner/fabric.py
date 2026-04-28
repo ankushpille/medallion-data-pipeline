@@ -15,7 +15,9 @@ class FabricScanner(CloudScanner):
     def scan(self, settings: Any, **kwargs) -> Dict[str, List[str]]:
         raw_assets: Dict[str, List[Any]] = {
             "fabric_workspaces": [],
-            "fabric_items": []
+            "fabric_items": [],
+            "warnings": [],
+            "errors": [],
         }
 
         try:
@@ -23,6 +25,7 @@ class FabricScanner(CloudScanner):
             azure_token = kwargs.get("azure_token_fabric") or kwargs.get("azure_token")
             if not azure_token:
                 logger.info("No delegated token for Fabric, skipping deep scan.")
+                raw_assets["warnings"].append("No Fabric delegated token provided; workspace scan skipped.")
                 return {"raw_cloud_dump": [raw_assets]}
 
             # Microsoft Fabric API Scope
@@ -77,30 +80,36 @@ class FabricScanner(CloudScanner):
                                 definition = self._fetch_item_definition(headers, ws_id, item_id, item_type)
                                 if definition:
                                     item_meta["configuration"]["Definition"] = definition
+                                else:
+                                    item_meta["configuration"]["DefinitionFetchStatus"] = "unavailable"
+                                    raw_assets["warnings"].append(
+                                        f"Pipeline definition could not be extracted from Fabric API for item {item.get('displayName') or item_id}"
+                                    )
                                     
                             raw_assets["fabric_items"].append(item_meta)
             elif ws_response.status_code == 401:
                 logger.error("Fabric API 401 Unauthorized. The SSO token likely lacks the required PowerBI/Fabric scope ('https://analysis.windows.net/powerbi/api/.default').")
+                raw_assets["errors"].append("Fabric API returned 401 Unauthorized. Token may lack Fabric/Power BI scopes.")
             else:
                 logger.warning(f"Fabric API returned {ws_response.status_code}: {ws_response.text}")
+                raw_assets["errors"].append(f"Fabric API returned {ws_response.status_code} while listing workspaces.")
 
         except Exception as e:
             logger.error(f"Fabric Scan failed: {e}")
-            # Fallback for demo/dev if nothing found
-            if not raw_assets["fabric_items"]:
-                return self._simulate_fabric()
+            raw_assets["errors"].append(f"Fabric scan failed: {e.__class__.__name__}")
 
         return {"raw_cloud_dump": [raw_assets]}
 
     def _fetch_item_definition(self, headers: Dict[str, str], workspace_id: str, item_id: str, item_type: str) -> Dict[str, Any] | None:
         urls = [
             f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/items/{item_id}/getDefinition",
+            f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/dataPipelines/{item_id}/getDefinition",
             f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}/{str(item_type).lower()}/items/{item_id}/getDefinition",
         ]
 
         for url in urls:
             try:
-                response = requests.post(url, headers=headers, timeout=15)
+                response = requests.post(url, headers=headers, json={}, timeout=15)
                 if response.status_code in (200, 201):
                     payload = response.json()
                     decoded = self._decode_definition_payload(payload)
@@ -174,48 +183,8 @@ class FabricScanner(CloudScanner):
 
     def _simulate_fabric(self) -> Dict[str, List[Any]]:
         return {"raw_cloud_dump": [{
-            "fabric_workspaces": [
-                {
-                    "id": "fabric || Analytics-Hub",
-                    "configuration": {"Type": "Workspace", "Region": "West US"}
-                }
-            ],
-            "fabric_items": [
-                {
-                    "id": "fabric || Customer-Lakehouse",
-                    "configuration": {"Type": "Lakehouse", "Workspace": "Analytics-Hub"}
-                },
-                {
-                    "id": "fabric || Silver-Transformation",
-                    "configuration": {
-                        "Type": "Pipeline",
-                        "Workspace": "Analytics-Hub",
-                        "Definition": {
-                            "pipeline-content.json": {
-                                "properties": {
-                                    "activities": [
-                                        {
-                                            "name": "API Ingestion",
-                                            "type": "WebActivity",
-                                            "typeProperties": {
-                                                "method": "GET",
-                                                "url": "https://api.contoso.com/orders"
-                                            }
-                                        },
-                                        {
-                                            "name": "Notebook 1",
-                                            "type": "TridentNotebook",
-                                            "dependsOn": [{"activity": "API Ingestion"}],
-                                            "typeProperties": {
-                                                "notebookId": "nb-001",
-                                                "workspaceId": "Analytics-Hub"
-                                            }
-                                        }
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                }
-            ]
+            "fabric_workspaces": [],
+            "fabric_items": [],
+            "warnings": ["Fabric simulation is disabled for pipeline-definition scans."],
+            "errors": []
         }]}
