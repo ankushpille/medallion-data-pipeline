@@ -84,7 +84,7 @@ def _normalize_path(full_path: str, client_name: str, source_type: str) -> str:
 # ---------------------------------------------------------
 
 @mcp.tool()
-def list_datasets(source_type: str, client_name: str, folder_path: str, container: Optional[str] = None) -> str:
+def list_datasets(source_type: str, client_name: str, folder_path: str, container: Optional[str] = None):
     """
     Lists datasets from ADLS (Azure Data Lake Storage).
     Returns a JSON string of List[DatasetInfo].
@@ -128,7 +128,7 @@ def list_datasets(source_type: str, client_name: str, folder_path: str, containe
 
 
 @mcp.tool()
-def list_children(source_type: str, client_name: str, folder_path: str, container: Optional[str] = None) -> str:
+def list_children(source_type: str, client_name: str, folder_path: str, container: Optional[str] = None):
     """
     Lists immediate child folders and files at the given path.
     Returns a JSON string: {"folders": [str], "files": [DatasetInfo-like dicts]}
@@ -180,7 +180,7 @@ def list_children(source_type: str, client_name: str, folder_path: str, containe
 
 
 @mcp.tool()
-def get_file_content_base64(source_type: str, client_name: str, file_path_canonical: str, container: Optional[str] = None) -> str:
+def get_file_content_base64(source_type: str, client_name: str, file_path_canonical: str, container: Optional[str] = None):
     """
     Reads file content and returns it as base64 string.
     """
@@ -393,7 +393,7 @@ def _records_to_csv_bytes(records: list) -> bytes:
 
 
 @mcp.tool()
-def list_api_datasets(source_type: str, client_name: str, folder_path: str) -> str:
+def list_api_datasets(source_type: str, client_name: str, folder_path: str):
     """
     Lists datasets from a REST API or direct file URL.
     Config is read from DB by client_name — register first via POST /api-source/register.
@@ -437,7 +437,7 @@ def list_api_datasets(source_type: str, client_name: str, folder_path: str) -> s
 
 
 @mcp.tool()
-def get_api_file_content(source_type: str, client_name: str, file_path_canonical: str) -> str:
+def get_api_file_content(source_type: str, client_name: str, file_path_canonical: str):
     """
     Fetches data from the registered API and returns base64-encoded CSV.
     file_path_canonical: "<endpoint>/<filename>.csv"
@@ -474,7 +474,7 @@ def get_api_file_content(source_type: str, client_name: str, file_path_canonical
 
 
 @mcp.tool()
-def list_api_children(source_type: str, client_name: str, folder_path: str) -> str:
+def list_api_children(source_type: str, client_name: str, folder_path: str):
     """Lists available API endpoints as virtual folders from DB config."""
     try:
         cfg       = _get_api_config(client_name, folder_path)
