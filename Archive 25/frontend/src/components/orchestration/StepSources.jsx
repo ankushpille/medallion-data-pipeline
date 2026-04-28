@@ -1,24 +1,21 @@
-import { FiCheck, FiZap, FiFolder, FiFile, FiChevronRight, FiRefreshCw, FiClock, FiLink, FiBox, FiCloud, FiSearch } from 'react-icons/fi';
-import { useNavigate } from 'react-router-dom';
+import { FiCheck, FiZap, FiFolder, FiFile, FiChevronRight, FiLink, FiBox, FiCloud } from 'react-icons/fi';
 import { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import FluentSelect from '../FluentSelect';
 import logo from '../../assets/images/image.png';
-import CloudPortalScanModal from './CloudPortalScanModal';
+import '../PipelineIntelligence.css';
 
 export default function StepSources({
   selectedClient, apiSources, s3Sources = [], adlsSources = [], apiSourcesLoading,
   selectedApiSource, setSelectedApiSource,
   selectedEndpoint, setSelectedEndpoint,
-  setSourceType, setFolderPath,
+  sourceType, setSourceType, setFolderPath,
   setShowUploadModal, openExplorer, onNext, call,
-  refreshTrigger, intelligenceData, setIntelligenceData
+  refreshTrigger, intelligenceData
 }) {
-  const navigate = useNavigate();
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
   const [selectedLocalFiles, setSelectedLocalFiles] = useState([]);
-  const [showCloudScanModal, setShowCloudScanModal] = useState(false);
 
   useEffect(() => {
     if (selectedClient) {
@@ -67,19 +64,21 @@ export default function StepSources({
 
   useEffect(() => {
     if (intelligenceData?.ingestion_support) {
-      const details = intelligenceData.ingestion_details || {};
-      if (details.source_type && details.source_path && !selectedEndpoint) {
-        setSourceType(details.source_type);
-        setFolderPath(details.source_path);
-        setSelectedEndpoint(details.source_path);
+      const details = intelligenceData.ingestion_details || intelligenceData.reformatted_config || {};
+      const detectedSourceType = details.source_type || intelligenceData.reformatted_config?.source_type;
+      const detectedSourcePath = details.source_path || intelligenceData.reformatted_config?.source_path;
+      if (detectedSourceType) setSourceType(detectedSourceType);
+      if (detectedSourcePath) {
+        setFolderPath(detectedSourcePath);
+        setSelectedEndpoint(detectedSourcePath);
         setSelectedApiSource('intelligence-scan');
       }
 
-      if (details.source_type === 'S3') {
+      if (detectedSourceType === 'S3') {
         setActiveTab('S3');
-      } else if (details.source_type === 'ADLS') {
+      } else if (detectedSourceType === 'ADLS') {
         setActiveTab('ADLS');
-      } else if (details.source_type === 'FABRIC') {
+      } else if (detectedSourceType === 'LOCAL') {
         setActiveTab('LOCAL');
       } else if (intelligenceData.ingestion_support.api) {
         setActiveTab('API');
@@ -105,6 +104,104 @@ export default function StepSources({
     { id: 'ADLS', label: 'Azure ADLS', icon: <FiCloud />, color: '#0078d4' }
   ];
 
+  const scanDetails = intelligenceData?.ingestion_details || intelligenceData?.reformatted_config || {};
+  const detectedSourceType = sourceType || scanDetails.source_type || intelligenceData?.reformatted_config?.source_type || sourceTabs.find(t => t.id === activeTab)?.id;
+  const detectedSourcePath = selectedEndpoint || scanDetails.source_path || intelligenceData?.reformatted_config?.source_path || '';
+  const support = intelligenceData?.ingestion_support || {};
+  const ingestionRows = [
+    { key: 'file_based', label: 'File-based ingestion' },
+    { key: 'api', label: 'API ingestion' },
+    { key: 'database', label: 'Database ingestion' },
+    { key: 'streaming', label: 'Streaming' },
+    { key: 'batch', label: 'Batch' },
+  ];
+
+  const renderScanDrivenSources = () => (
+    <div className="step-body">
+      <div style={{ marginBottom: 20, padding: 12, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, color: '#047857' }}>
+        <FiZap size={20} />
+        <div style={{ fontSize: 13, fontWeight: 600 }}>
+          <strong>Auto-detected from Pipeline Intelligence.</strong> Confirm the detected source and ingestion modes before configuration.
+        </div>
+      </div>
+
+      <div className="pi-grid">
+        {ingestionRows.map(row => {
+          const supported = !!support[row.key];
+          return (
+            <div key={row.key} className="pi-card" style={{ opacity: supported ? 1 : 0.55 }}>
+              <div className="pi-card-title">{row.label}</div>
+              <div className="pi-card-content">
+                <span className={`pi-tag ${supported ? 'active' : 'inactive'}`}>
+                  {supported ? 'Supported' : 'Not Detected'}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="pi-card" style={{ marginTop: 16 }}>
+        <div className="pi-card-title">Detected Source</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12, alignItems: 'center' }}>
+          <label className="cloud-scan-field">
+            <span>Source Type</span>
+            <select
+              className="orch-input"
+              value={detectedSourceType || ''}
+              onChange={(e) => setSourceType(e.target.value)}
+            >
+              <option value="S3">S3</option>
+              <option value="ADLS">ADLS</option>
+              <option value="API">API</option>
+              <option value="LOCAL">LOCAL</option>
+            </select>
+          </label>
+          <label className="cloud-scan-field">
+            <span>Suggested source path / bucket / API / table</span>
+            <input
+              className="orch-input"
+              value={detectedSourcePath}
+              onChange={(e) => {
+                setFolderPath(e.target.value);
+                setSelectedEndpoint(e.target.value);
+                setSelectedApiSource('intelligence-scan');
+              }}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="pi-card" style={{ marginTop: 16 }}>
+        <div className="pi-card-title">Formats</div>
+        <div className="pi-tag-list">
+          {(intelligenceData?.file_types || []).map(ft => <span key={ft} className="pi-tag active">{ft}</span>)}
+          {(!intelligenceData?.file_types || intelligenceData.file_types.length === 0) && <span className="pi-tag inactive">None Detected</span>}
+        </div>
+      </div>
+
+      <div className="pi-card" style={{ marginTop: 16 }}>
+        <div className="pi-card-title">Detected Ingestion Types</div>
+        <div className="pi-tag-list">
+          {(intelligenceData?.ingestion_types || []).map(mode => (
+            <span key={mode} className="pi-tag active">{mode.replace(/_/g, ' ')}</span>
+          ))}
+          {(!intelligenceData?.ingestion_types || intelligenceData.ingestion_types.length === 0) && <span className="pi-tag inactive">None Detected</span>}
+        </div>
+      </div>
+
+      <div className="step-footer">
+        <button
+          className="orch-btn primary step-next-btn"
+          disabled={!detectedSourcePath}
+          onClick={() => onNext()}
+        >
+          Continue to Configuration →
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <motion.div
       key="step2"
@@ -120,7 +217,7 @@ export default function StepSources({
         </div>
         
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <div className="source-tabs" style={{ display: 'flex', gap: 4, background: 'var(--surface2)', padding: 4, borderRadius: 14 }}>
+          {!intelligenceData && <div className="source-tabs" style={{ display: 'flex', gap: 4, background: 'var(--surface2)', padding: 4, borderRadius: 14 }}>
             {sourceTabs.map(t => (
               <button
                 key={t.id}
@@ -157,35 +254,14 @@ export default function StepSources({
                 </div>
               </button>
             ))}
-          </div>
-          <button
-            className="orch-btn tiny"
-            onClick={() => setShowCloudScanModal(true)}
-            style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}
-          >
-            <FiSearch /> Scan Framework
-          </button>
+          </div>}
           
           <div className="header-logo-divider" style={{ width: 1, height: 24, background: 'rgba(0,0,0,0.1)', marginLeft: 8 }} />
           <img src={logo} alt="Agilisium" style={{ height: 28, objectFit: 'contain' }} />
         </div>
       </div>
 
-      {intelligenceData && (
-        <div style={{ marginBottom: 20, padding: 12, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12, color: '#047857' }}>
-          <FiZap size={20} />
-          <div style={{ fontSize: 13, fontWeight: 500 }}>
-            <strong>Auto-detected capabilities:</strong> The intelligent scan detected 
-            {intelligenceData.ingestion_support?.api ? ' API' : ''}
-            {intelligenceData.ingestion_support?.file_based ? ' File-based' : ''}
-            {intelligenceData.ingestion_support?.database ? ' Database' : ''} 
-            ingestion. Supported formats: {intelligenceData.file_types?.join(', ') || 'Unknown'}.
-            {intelligenceData.ingestion_details?.source_path && (
-              <span> Suggested source: {intelligenceData.ingestion_details.source_path}.</span>
-            )}
-          </div>
-        </div>
-      )}
+      {intelligenceData ? renderScanDrivenSources() : (
 
       <div className="step-body">
         <div className="tab-content" style={{ minHeight: 300 }}>
@@ -304,15 +380,6 @@ export default function StepSources({
                         )}
                       </div>
                       <div className="source-actions">
-                        <button
-                          className="orch-btn tiny ghost"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowCloudScanModal(true);
-                          }}
-                        >
-                          <FiSearch style={{ marginRight: 6 }} /> Scan Framework
-                        </button>
                         <button 
                           className="orch-btn tiny"
                           onClick={(e) => {
@@ -389,9 +456,6 @@ export default function StepSources({
                     <FiChevronRight size={48} style={{ opacity: 0.2, marginBottom: 16 }} />
                     <div style={{ fontWeight: 600, color: 'var(--text2)' }}>No ADLS Containers Connected</div>
                     <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>Register a new ADLS source in Step 1 to see it here.</div>
-                    <button className="orch-btn tiny" onClick={() => setShowCloudScanModal(true)} style={{ marginTop: 14 }}>
-                      <FiSearch style={{ marginRight: 6 }} /> Scan Framework
-                    </button>
                   </div>
                 )}
               </div>
@@ -410,23 +474,6 @@ export default function StepSources({
           </button>
         </div>
       </div>
-      {showCloudScanModal && (
-        <CloudPortalScanModal
-          selectedClient={selectedClient}
-          onClose={() => setShowCloudScanModal(false)}
-          onScanComplete={(result) => {
-            setIntelligenceData?.(result);
-            const details = result?.ingestion_details || result?.reformatted_config || {};
-            const nextSourceType = details.source_type;
-            const nextPath = details.source_path;
-            if (nextSourceType) setSourceType(nextSourceType);
-            if (nextPath) {
-              setFolderPath(nextPath);
-              setSelectedEndpoint(nextPath);
-              setSelectedApiSource('framework-scan');
-            }
-          }}
-        />
       )}
     </motion.div>
   );

@@ -695,6 +695,16 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                 <PipelineIntelligence
                   clientName={selectedClient}
                   initialData={intelligenceData}
+                  onScanComplete={(data) => {
+                    setIntelligenceData(data);
+                    const details = data?.ingestion_details || data?.reformatted_config || {};
+                    if (details.source_type) setSourceType(details.source_type);
+                    if (details.source_path) {
+                      setFolderPath(details.source_path);
+                      setSelectedEndpoint(details.source_path);
+                      setSelectedApiSource('intelligence-scan');
+                    }
+                  }}
                   onConfirm={(data) => {
                     if (data) setIntelligenceData(data);
                     setStep(3);
@@ -712,6 +722,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   setSelectedApiSource={setSelectedApiSource}
                   selectedEndpoint={selectedEndpoint}
                   setSelectedEndpoint={setSelectedEndpoint}
+                  sourceType={sourceType}
                   setSourceType={setSourceType}
                   setFolderPath={setFolderPath}
                   setShowUploadModal={setShowUploadModal}
@@ -719,7 +730,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   call={call}
                   refreshTrigger={localRefreshTrigger}
                   intelligenceData={intelligenceData}
-                  setIntelligenceData={setIntelligenceData}
                   onNext={() => { setStep(4); }}
                 />
               )}

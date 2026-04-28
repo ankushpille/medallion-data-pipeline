@@ -31,10 +31,9 @@ function CredentialInput({ label, value, onChange, type = 'text', placeholder = 
   );
 }
 
-export default function CloudPortalScanModal({ selectedClient, onClose, onScanComplete }) {
-  const [target, setTarget] = useState('aws');
+export default function CloudPortalScanModal({ selectedClient, initialTarget = 'aws', useCloudLlm = true, onTargetChange, onClose, onScanComplete }) {
+  const [target, setTarget] = useState(initialTarget);
   const [credentials, setCredentials] = useState(EMPTY_CREDS);
-  const [useCloudLlm, setUseCloudLlm] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -61,13 +60,16 @@ export default function CloudPortalScanModal({ selectedClient, onClose, onScanCo
     setLoading(true);
     setError('');
     try {
-      const authMode = selectedPortal?.authMode || 'credentials';
       const requestCredentials = buildCredentials();
+      const hasCredentials = Object.keys(requestCredentials).length > 0;
+      let authMode = selectedPortal?.authMode || 'credentials';
       const headers = { 'Content-Type': 'application/json' };
       if (target === 'fabric' && requestCredentials.sso_token) {
         headers.Authorization = `Bearer ${requestCredentials.sso_token}`;
         delete requestCredentials.sso_token;
       }
+      if (!hasCredentials && target !== 'fabric') authMode = 'none';
+      if (target === 'fabric' && !hasCredentials) authMode = 'none';
 
       const response = await fetch(apiUrl('/discovery/analyze'), {
         method: 'POST',
@@ -117,7 +119,10 @@ export default function CloudPortalScanModal({ selectedClient, onClose, onScanCo
               key={portal.id}
               type="button"
               className={`cloud-scan-portal ${target === portal.id ? 'selected' : ''}`}
-              onClick={() => setTarget(portal.id)}
+              onClick={() => {
+                setTarget(portal.id);
+                onTargetChange?.(portal.id);
+              }}
             >
               <span>{portal.icon}</span>
               {portal.label}
@@ -157,11 +162,6 @@ export default function CloudPortalScanModal({ selectedClient, onClose, onScanCo
             </div>
           )}
         </div>
-
-        <label className="cloud-scan-llm">
-          <input type="checkbox" checked={useCloudLlm} onChange={(e) => setUseCloudLlm(e.target.checked)} />
-          <span>Use GPT API to extract ingestion, source, and DQ rules</span>
-        </label>
 
         {error && <div className="panel-error-alert">{error}</div>}
 

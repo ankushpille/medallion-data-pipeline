@@ -229,8 +229,10 @@ async def analyze_pipeline_live(
     settings = DummySettings(credentials)
     target_key = _normalize_target(target, providers)
     provider_list = [p.strip().lower() for p in providers.split(",")] if providers else [target_key]
-    resolved_auth_mode = auth_mode or ("sso" if target_key == "fabric" else "credentials")
+    has_request_credentials = bool(credentials) or bool(authorization_token)
+    resolved_auth_mode = auth_mode or ("sso" if target_key == "fabric" and authorization_token else "credentials" if has_request_credentials else "none")
     scan_status = "success"
+    is_fallback = False
 
     live_data = None
     try:
@@ -243,10 +245,12 @@ async def analyze_pipeline_live(
     except Exception as e:
         logger.warning(f"Live scan failed: {e}. Using rule-based fallback.")
         scan_status = "partial"
+        is_fallback = True
 
     if not live_data or not _flatten_assets(live_data):
         live_data = _fallback_raw_assets(target_key)
         scan_status = "partial"
+        is_fallback = True
 
     combined_text = json.dumps(live_data).lower() if live_data else ""
     
@@ -349,6 +353,7 @@ async def analyze_pipeline_live(
         "framework": detected_framework,
         "auth_mode": resolved_auth_mode,
         "scan_status": scan_status,
+        "is_fallback": is_fallback,
         "discovered_assets": discovered_assets,
         "data_pipelines": data_pipelines,
         "source_systems": source_systems,

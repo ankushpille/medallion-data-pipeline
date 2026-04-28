@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { FiActivity, FiArrowRight, FiCheck, FiCloud, FiCpu, FiDatabase, FiFile, FiSearch, FiSettings, FiZap } from 'react-icons/fi';
-import { apiUrl } from '../hooks/useApi';
+import CloudPortalScanModal from './orchestration/CloudPortalScanModal';
 import './PipelineIntelligence.css';
 
 const TARGETS = [
@@ -8,18 +8,6 @@ const TARGETS = [
   { id: 'azure', label: 'Azure Active (SSO)', icon: <FiCloud /> },
   { id: 'fabric', label: 'Microsoft Fabric', icon: <FiZap /> },
 ];
-
-export async function executeLiveScan(payload) {
-  const response = await fetch(apiUrl('/discovery/analyze'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    throw new Error(`Live scan failed: ${response.statusText}`);
-  }
-  return response.json();
-}
 
 function JsonBlock({ value }) {
   return (
@@ -33,41 +21,13 @@ function Tag({ active, children }) {
   return <span className={`pi-tag ${active === false ? 'inactive' : 'active'}`}>{children}</span>;
 }
 
-export default function PipelineIntelligence({ clientName, initialData, onConfirm }) {
+export default function PipelineIntelligence({ clientName, initialData, onScanComplete, onConfirm }) {
   const [data, setData] = useState(initialData || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [target, setTarget] = useState(initialData?.ingestion_details?.target || 'aws');
   const [useCloudLlm, setUseCloudLlm] = useState(true);
-
-  const handleScan = async () => {
-    if (!clientName) {
-      setError('Missing client selection.');
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-      setData(null);
-
-      const result = await executeLiveScan({
-        client_name: clientName,
-        target,
-        scan_mode: 'live',
-        auth_mode: target === 'fabric' ? 'sso' : 'credentials',
-        credentials: {},
-        use_cloud_llm: useCloudLlm,
-        llm_provider: 'gpt',
-      });
-
-      setData(result);
-    } catch (err) {
-      setError(err.message || 'Failed to scan live environment.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [showCloudScanModal, setShowCloudScanModal] = useState(false);
 
   const flow = data?.interactive_flow || data?.loading_flow || [];
   const support = data?.ingestion_support || {};
@@ -103,8 +63,19 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
       </label>
 
       <div className="pi-scan-trigger">
-        <button className="pi-btn-confirm" onClick={handleScan} disabled={loading || !clientName}>
-          <FiSearch /> {loading ? 'Scanning...' : 'Execute Scan'}
+        <button
+          className="pi-btn-confirm"
+          onClick={() => {
+            if (!clientName) {
+              setError('Missing client selection.');
+              return;
+            }
+            setError(null);
+            setShowCloudScanModal(true);
+          }}
+          disabled={loading || !clientName}
+        >
+          <FiSearch /> Scan Framework
         </button>
       </div>
 
@@ -138,7 +109,8 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
               <div className="pi-card-title"><FiCpu /> Detected Framework</div>
               <div className="pi-card-content pi-framework">{data.framework || 'Unknown'}</div>
               <div className="pi-card-content" style={{ marginTop: 8, fontSize: 12 }}>
-                Status: {data.scan_status || 'success'} · Auth: {data.auth_mode || 'credentials'}
+                Status: {data.scan_status || 'success'} · Auth: {data.auth_mode || 'none'}
+                {data.is_fallback ? ' · Fallback response' : ''}
               </div>
             </div>
 
@@ -252,6 +224,23 @@ export default function PipelineIntelligence({ clientName, initialData, onConfir
             </button>
           </div>
         </>
+      )}
+
+      {showCloudScanModal && (
+        <CloudPortalScanModal
+          selectedClient={clientName}
+          initialTarget={target}
+          useCloudLlm={useCloudLlm}
+          onTargetChange={setTarget}
+          onClose={() => {
+            setLoading(false);
+            setShowCloudScanModal(false);
+          }}
+          onScanComplete={(result) => {
+            setData(result);
+            onScanComplete?.(result);
+          }}
+        />
       )}
     </div>
   );

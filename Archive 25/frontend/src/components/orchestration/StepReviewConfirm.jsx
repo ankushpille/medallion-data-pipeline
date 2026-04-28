@@ -42,6 +42,7 @@ export default function StepReviewConfirm({
           target: intelligenceData.ingestion_details?.target,
           auth_mode: intelligenceData.auth_mode,
           scan_status: intelligenceData.scan_status,
+          is_fallback: intelligenceData.is_fallback,
           source_path: intelligenceData.ingestion_details?.source_path,
         }
       : null,
@@ -69,6 +70,7 @@ export default function StepReviewConfirm({
           <SummaryChip label="Framework" value={intelligenceData?.framework} />
           <SummaryChip label="Auth" value={intelligenceData?.auth_mode} />
           <SummaryChip label="Scan" value={intelligenceData?.scan_status} />
+          <SummaryChip label="Fallback" value={intelligenceData?.is_fallback ? 'Yes' : 'No'} />
           <SummaryChip label="Source" value={sourceType} />
           <SummaryChip label="Endpoint" value={folderPath} />
         </div>
