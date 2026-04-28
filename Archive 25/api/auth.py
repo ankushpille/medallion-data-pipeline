@@ -7,8 +7,9 @@ from urllib.parse import urlparse
 import msal
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from loguru import logger
 
-from core.settings import settings
+from core.settings import ENV_FILE, settings
 
 router = APIRouter(tags=["Auth"])
 
@@ -90,9 +91,25 @@ def _build_msal_app() -> msal.ConfidentialClientApplication:
 
 @router.get("/auth/microsoft/status")
 async def microsoft_auth_status():
-    app_registration_configured = bool(settings.AZURE_CLIENT_ID and settings.AZURE_CLIENT_SECRET)
+    azure_client_id_present = bool(settings.AZURE_CLIENT_ID)
+    azure_client_secret_present = bool(settings.AZURE_CLIENT_SECRET)
+    azure_tenant_id_present = bool(settings.AZURE_TENANT_ID)
+    app_registration_configured = bool(azure_client_id_present and azure_client_secret_present)
+    logger.info(
+        "Microsoft auth status checked. env_file={} AZURE_CLIENT_ID present={} AZURE_CLIENT_SECRET present={} AZURE_TENANT_ID present={} AZURE_REDIRECT_URI={}",
+        str(ENV_FILE),
+        azure_client_id_present,
+        azure_client_secret_present,
+        azure_tenant_id_present,
+        settings.AZURE_REDIRECT_URI or "",
+    )
     return {
         "app_registration_configured": app_registration_configured,
+        "azure_client_id_present": azure_client_id_present,
+        "azure_client_secret_present": azure_client_secret_present,
+        "azure_tenant_id_present": azure_tenant_id_present,
+        "azure_redirect_uri": settings.AZURE_REDIRECT_URI or "",
+        "env_file": str(ENV_FILE),
         "azure_local_session_supported": bool(settings.AZURE_ENABLE_LOCAL_SESSION_FALLBACK),
         "fabric_local_session_supported": bool(settings.FABRIC_ENABLE_LOCAL_SESSION_FALLBACK),
         "fabric_requires_token_or_app_registration": not bool(settings.FABRIC_ENABLE_LOCAL_SESSION_FALLBACK),
@@ -149,6 +166,15 @@ async def microsoft_login(
         "auth_request_id": request.query_params.get("auth_request_id", ""),
     }
     return RedirectResponse(flow["auth_uri"])
+
+
+@router.get("/login")
+async def microsoft_login_shortcut(
+    request: Request,
+    target: str = Query("fabric"),
+    origin: str = Query("http://localhost:3000"),
+):
+    return await microsoft_login(request=request, target=target, origin=origin)
 
 
 @router.get("/auth/microsoft/start")

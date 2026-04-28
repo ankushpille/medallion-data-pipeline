@@ -1,6 +1,10 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import AliasChoices, Field
+from pathlib import Path
 from typing import Optional
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+ENV_FILE = BASE_DIR / ".env"
 
 class Settings(BaseSettings):
     APP_ENV: str = "local"
@@ -27,7 +31,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AZURE_CLIENT_SECRET", "CLIENT_SECRET"),
     )               # Service Principal secret (optional)
     AZURE_AUTHORITY: Optional[str] = None
-    AZURE_REDIRECT_URI: Optional[str] = None
+    AZURE_REDIRECT_URI: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_REDIRECT_URI", "REDIRECT_URI", "azure_redirect_uri"),
+    )
     AZURE_SSO_SCOPES_AZURE: Optional[str] = "https://management.azure.com/user_impersonation"
     AZURE_SSO_SCOPES_FABRIC: Optional[str] = "https://api.fabric.microsoft.com/Workspace.Read.All"
     AZURE_ENABLE_LOCAL_SESSION_FALLBACK: bool = True
@@ -46,6 +53,6 @@ class Settings(BaseSettings):
     EMAIL_TO: Optional[str] = None
 
     # Allow reading from .env file
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(ENV_FILE), extra="ignore")
 
 settings = Settings()

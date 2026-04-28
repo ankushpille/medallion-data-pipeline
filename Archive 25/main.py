@@ -20,8 +20,11 @@ from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-# Load .env variables into os.environ (fixes issues where Pydantic might miss them or other libs rely on os.getenv)
-load_dotenv()
+# Load this backend's .env explicitly so running uvicorn from another working
+# directory cannot accidentally pick up another project's environment.
+BASE_DIR = Path(__file__).resolve().parent
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 setup_logger()
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { FiCloud, FiLock, FiSearch, FiX, FiZap } from 'react-icons/fi';
 import { motion } from 'framer-motion';
-import { apiUrl } from '../../hooks/useApi';
+import { API_BASE_URL } from '../../hooks/useApi';
 
 const PORTALS = [
   { id: 'aws', label: 'AWS', authMode: 'credentials', icon: <FiCloud /> },
@@ -31,6 +31,10 @@ function CredentialInput({ label, value, onChange, type = 'text', placeholder = 
   );
 }
 
+function backendUrl(path) {
+  return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export default function CloudPortalScanModal({ selectedClient, initialTarget = 'aws', useCloudLlm = true, onTargetChange, onClose, onScanComplete }) {
   const [target, setTarget] = useState(initialTarget);
   const [credentials, setCredentials] = useState(EMPTY_CREDS);
@@ -46,10 +50,9 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
     fabric_requires_token_or_app_registration: false,
   });
 
-  const selectedPortal = useMemo(() => PORTALS.find((p) => p.id === target), [target]);
   const apiOrigin = useMemo(() => {
     try {
-      return new URL(apiUrl('/')).origin;
+      return new URL(backendUrl('/')).origin;
     } catch {
       return window.location.origin;
     }
@@ -100,7 +103,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
 
     const timer = window.setInterval(async () => {
       try {
-        const response = await fetch(apiUrl(`/auth/microsoft/result?auth_request_id=${encodeURIComponent(authRequestId)}`));
+        const response = await fetch(backendUrl(`/auth/microsoft/result?auth_request_id=${encodeURIComponent(authRequestId)}`), { cache: 'no-store' });
         const payload = await response.json();
         if (!payload || payload.status === 'pending' || payload.status === 'unknown') return;
 
@@ -132,16 +135,24 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
 
   useEffect(() => {
     let cancelled = false;
-    fetch(apiUrl('/auth/microsoft/status'))
-      .then((res) => res.json())
-      .then((data) => {
-        if (!cancelled) setAuthStatus(data);
+    setError('');
+    fetch(backendUrl(`/auth/microsoft/status?_=${Date.now()}`), { cache: 'no-store' })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Auth status failed with ${res.status}`);
+        return res.json();
       })
-      .catch(() => {});
+      .then((data) => {
+        if (!cancelled) {
+          setAuthStatus((prev) => ({ ...prev, ...data }));
+        }
+      })
+      .catch((statusError) => {
+        if (!cancelled) setError(statusError?.message || 'Could not refresh Microsoft SSO status.');
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [target]);
 
   const startMicrosoftSso = () => {
     if (!authStatus.app_registration_configured) {
@@ -163,7 +174,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
 
     setError('');
     setSigningIn(true);
-    fetch(apiUrl(`/auth/microsoft/start?target=${encodeURIComponent(target)}&origin=${encodeURIComponent(window.location.origin)}`))
+    fetch(backendUrl(`/auth/microsoft/start?target=${encodeURIComponent(target)}&origin=${encodeURIComponent(window.location.origin)}`), { cache: 'no-store' })
       .then((res) => res.json())
       .then((data) => {
         if (!data?.login_url || !data?.auth_request_id) {
@@ -215,7 +226,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         authMode = 'credentials';
       }
 
-      const response = await fetch(apiUrl('/discovery/analyze'), {
+      const response = await fetch(backendUrl('/discovery/analyze'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
