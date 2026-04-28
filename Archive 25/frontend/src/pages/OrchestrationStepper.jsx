@@ -9,8 +9,8 @@ import FluentSelect from '../components/FluentSelect';
 import StepClient from '../components/orchestration/StepClient';
 import StepSources from '../components/orchestration/StepSources';
 import StepConfig from '../components/orchestration/StepConfig';
-import StepDQ from '../components/orchestration/StepDQ';
 import StepProgress from '../components/orchestration/StepProgress';
+import StepReviewConfirm from '../components/orchestration/StepReviewConfirm';
 import PipelineIntelligence from '../components/PipelineIntelligence';
 import HistoryView from './HistoryView';
 import './orchestration.css';
@@ -626,7 +626,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
         </div>
       ) : (
         <>
-          {/* 5-Step Stepper Bar */}
+          {/* Stepper Bar */}
           <div className="stepper-bar">
             <div className="stepper-steps-container" style={{ display: 'flex', alignItems: 'center', gap: 0, flex: 1, justifyContent: 'center' }}>
               {STEPS.map((s, idx) => (
@@ -694,6 +694,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
               {step === 2 && (
                 <PipelineIntelligence
                   clientName={selectedClient}
+                  initialData={intelligenceData}
                   onConfirm={(data) => {
                     if (data) setIntelligenceData(data);
                     setStep(3);
@@ -717,6 +718,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   openExplorer={openExplorer}
                   call={call}
                   refreshTrigger={localRefreshTrigger}
+                  intelligenceData={intelligenceData}
                   onNext={() => { setStep(4); }}
                 />
               )}
@@ -729,42 +731,18 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   toast={toast}
                   onNext={() => { fetchDatasets(); setStep(5); }}
                   syncMasterConfig={syncMasterConfig}
+                  intelligenceData={intelligenceData}
                 />
               )}
-              {step === 4 && (
-                <StepDQ
+              {step === 5 && (
+                <StepReviewConfirm
                   selectedClient={selectedClient}
                   sourceType={sourceType}
                   folderPath={folderPath}
-                  datasets={datasets}
-                  fetchDatasets={fetchDatasets}
-                  datasetsLoading={datasetsLoading}
-                  editingConfigDataset={editingConfigDataset}
-                  setEditingConfigDataset={setEditingConfigDataset}
-                  editingConfigColumns={editingConfigColumns}
-                  editingConfigLoading={editingConfigLoading}
-                  selectedDqDataset={selectedDqDataset}
-                  setSelectedDqDataset={setSelectedDqDataset}
-                  showDQPanel={showDQPanel}
-                  setShowDQPanel={setShowDQPanel}
-                  loadDqConfig={loadDqConfig}
-                  setPendingDqDataset={setPendingDqDataset}
-                  setShowModeModal={setShowModeModal}
-                  dqError={dqError}
-                  setDqError={setDqError}
-                  dqLoading={dqLoading}
-                  isSuggesting={isSuggesting}
-                  editingRuleDrafts={editingRuleDrafts}
-                  setEditingRuleDrafts={setEditingRuleDrafts}
-                  toggleColumnActive={toggleColumnActive}
-                  changeColumnSeverity={changeColumnSeverity}
-                  saveColumnRule={saveColumnRule}
-                  saveDqConfig={saveDqConfig}
-                  editingConfigSaving={editingConfigSaving}
-                  formatDatasetLabel={formatDatasetLabel}
-                  onRunOrchestration={() => setStep(6)}
-                  isOrchestrating={isOrchestrating}
                   intelligenceData={intelligenceData}
+                  onBack={() => setStep(4)}
+                  onConfirm={runOrchestration}
+                  isOrchestrating={isOrchestrating}
                 />
               )}
               {step === 6 && (
@@ -778,6 +756,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   openExplorer={openExplorer}
                   statusColor={statusColor}
                   call={call}
+                  intelligenceData={intelligenceData}
                 />
               )}
             </AnimatePresence>

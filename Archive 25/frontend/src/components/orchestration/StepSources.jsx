@@ -65,13 +65,36 @@ export default function StepSources({
 
   useEffect(() => {
     if (intelligenceData?.ingestion_support) {
-      if (intelligenceData.ingestion_support.api) {
+      const details = intelligenceData.ingestion_details || {};
+      if (details.source_type && details.source_path && !selectedEndpoint) {
+        setSourceType(details.source_type);
+        setFolderPath(details.source_path);
+        setSelectedEndpoint(details.source_path);
+        setSelectedApiSource('intelligence-scan');
+      }
+
+      if (details.source_type === 'S3') {
+        setActiveTab('S3');
+      } else if (details.source_type === 'ADLS') {
+        setActiveTab('ADLS');
+      } else if (details.source_type === 'FABRIC') {
+        setActiveTab('LOCAL');
+      } else if (intelligenceData.ingestion_support.api) {
         setActiveTab('API');
       } else if (intelligenceData.ingestion_support.file_based) {
         setActiveTab('S3'); // Default to cloud storage
       }
     }
-  }, [intelligenceData]);
+  }, [intelligenceData, selectedEndpoint, setFolderPath, setSelectedApiSource, setSelectedEndpoint, setSourceType]);
+
+  const isTabSupported = (tabId) => {
+    if (!intelligenceData?.ingestion_support) return true;
+    if (tabId === 'LOCAL') return true;
+    if (tabId === 'API') return !!intelligenceData.ingestion_support.api;
+    if (tabId === 'S3') return !!intelligenceData.ingestion_support.file_based && intelligenceData.ingestion_details?.target !== 'azure';
+    if (tabId === 'ADLS') return !!intelligenceData.ingestion_support.file_based && intelligenceData.ingestion_details?.target !== 'aws';
+    return true;
+  };
 
   const sourceTabs = [
     { id: 'LOCAL', label: 'Local Files', icon: <FiFolder />, color: '#10b981' },
@@ -100,13 +123,15 @@ export default function StepSources({
               <button
                 key={t.id}
                 className={`source-tab-btn ${activeTab === t.id ? 'active' : ''}`}
-                onClick={() => setActiveTab(t.id)}
+                disabled={!isTabSupported(t.id)}
+                onClick={() => isTabSupported(t.id) && setActiveTab(t.id)}
                 style={{
                   padding: '8px 16px', borderRadius: 11, border: 'none',
                   background: 'transparent',
                   color: activeTab === t.id ? t.color : 'var(--text3)',
-                  fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
-                  fontSize: 12, transition: 'all 0.3s', position: 'relative'
+                  fontWeight: 700, cursor: isTabSupported(t.id) ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', gap: 8,
+                  fontSize: 12, transition: 'all 0.3s', position: 'relative',
+                  opacity: isTabSupported(t.id) ? 1 : 0.45
                 }}
               >
                 {activeTab === t.id && (
@@ -146,6 +171,9 @@ export default function StepSources({
             {intelligenceData.ingestion_support?.file_based ? ' File-based' : ''}
             {intelligenceData.ingestion_support?.database ? ' Database' : ''} 
             ingestion. Supported formats: {intelligenceData.file_types?.join(', ') || 'Unknown'}.
+            {intelligenceData.ingestion_details?.source_path && (
+              <span> Suggested source: {intelligenceData.ingestion_details.source_path}.</span>
+            )}
           </div>
         </div>
       )}
@@ -354,7 +382,7 @@ export default function StepSources({
         <div className="step-footer">
           <button
             className="orch-btn primary step-next-btn"
-            disabled={!selectedEndpoint}
+            disabled={!selectedEndpoint && !intelligenceData}
             onClick={() => onNext()}
           >
             Continue to Configuration →

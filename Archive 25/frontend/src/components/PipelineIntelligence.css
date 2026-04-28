@@ -31,10 +31,54 @@
   gap: 16px;
 }
 
+.pi-target-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.pi-target-card {
+  border: 1px solid var(--border, #e5e7eb);
+  background: var(--surface1, #fff);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text1, #111);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.pi-target-card.selected {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+}
+
+.pi-target-icon {
+  font-size: 18px;
+  display: flex;
+}
+
+.pi-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text2, #555);
+}
+
+.pi-scan-trigger {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .pi-card {
   background: var(--surface1, #fff);
   border: 1px solid var(--border, #e5e7eb);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 16px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.02);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -60,6 +104,18 @@
 .pi-card-content {
   font-size: 14px;
   color: var(--text1, #222);
+}
+
+.pi-framework {
+  font-size: 18px;
+  font-weight: 800;
+  color: #2563eb;
+}
+
+.pi-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .pi-tag-list {
@@ -135,6 +191,21 @@
   transition: all 0.2s ease;
 }
 
+.pi-btn-confirm:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.pi-btn-secondary {
+  background: #fff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .pi-btn-confirm:hover {
   transform: translateY(-1px);
   box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3);
@@ -151,6 +222,46 @@
   justify-content: center;
   padding: 40px;
   color: var(--text2, #555);
+}
+
+.pi-loader-steps {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #666;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pi-error {
+  padding: 16px;
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+}
+
+.pi-section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+.pi-wide {
+  grid-column: 1 / -1;
+}
+
+.pi-json {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .pi-spinner {

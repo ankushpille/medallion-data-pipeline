@@ -9,12 +9,19 @@ export default function StepConfig({
 }) {
   const navigate = useNavigate();
   const [configData, setConfigData] = useState([]);
+  const [generatedConfigText, setGeneratedConfigText] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (selectedClient) loadConfig();
   }, [selectedClient, folderPath]);
+
+  useEffect(() => {
+    if (intelligenceData?.reformatted_config) {
+      setGeneratedConfigText(JSON.stringify(intelligenceData.reformatted_config, null, 2));
+    }
+  }, [intelligenceData]);
 
   async function loadConfig() {
     setLoading(true);
@@ -139,6 +146,20 @@ export default function StepConfig({
               </tbody>
             </table>
           </div>
+        ) : configData.length === 0 && intelligenceData ? (
+          <div className="empty-source" style={{ padding: 24, textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div>
+              <strong>Generated config from scan</strong>
+              <div className="step-sub" style={{ marginTop: 4 }}>Review and edit this JSON before sending the execution payload forward.</div>
+            </div>
+            <textarea
+              className="orch-input"
+              rows={16}
+              value={generatedConfigText}
+              onChange={(e) => setGeneratedConfigText(e.target.value)}
+              style={{ fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5, width: '100%', resize: 'vertical' }}
+            />
+          </div>
         ) : configData.length === 0 ? (
           <div className="empty-source" style={{ padding: 60, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             <p style={{ marginBottom: 20 }}>No configuration found for these sources in the master config registry.</p>
@@ -216,8 +237,8 @@ export default function StepConfig({
           </button>
           <button
             className="orch-btn primary step-next-btn"
-            onClick={() => { saveConfig(); onNext(); }}
-            disabled={loading || configData.length === 0}
+            onClick={() => { if (configData.length > 0) saveConfig(); onNext(); }}
+            disabled={loading || (configData.length === 0 && !generatedConfigText)}
           >
             Commit & Continue →
           </button>
