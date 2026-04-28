@@ -37,6 +37,7 @@ dist/
 # Virtual environment
 venv/
 .venv/
+.tmp/
 
 # -----------------------------
 # IDE

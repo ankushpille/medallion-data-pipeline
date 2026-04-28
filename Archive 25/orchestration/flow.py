@@ -7,7 +7,17 @@ os.environ["LANGFUSE_SECRET_KEY"] = "sk-lf-acfa1a1f-a0a1-487d-8a3d-aa0b3b7fe488"
 os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-cbd909ac-2fcd-4f52-9772-bd467e9e0410"
 os.environ["LANGFUSE_BASE_URL"] = "https://cloud.langfuse.com"
 
-from langfuse import observe
+try:
+    from langfuse import observe
+except ImportError:
+    def observe(*args, **kwargs):
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def _decorator(fn):
+            return fn
+
+        return _decorator
 from core.mcp_connector import get_mcp_connector
 from core.notifications import NotificationService
 from core.master_config_manager import MasterConfigManager

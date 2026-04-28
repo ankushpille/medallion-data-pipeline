@@ -1,11 +1,23 @@
 [project]
-name = "azure-project"
+name = "dea-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "Data Engineer Agent backend"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10,<3.13"
 dependencies = [
-    "boto3>=1.42.74",
-    "botocore>=1.42.74",
-    "langfuse>=4.0.1",
+    "fastapi==0.115.12",
+    "starlette==0.46.2",
+    "uvicorn[standard]==0.34.2",
+    "loguru==0.7.3",
+    "azure-storage-blob==12.25.1",
+    "azure-storage-file-datalake==12.20.0",
+    "boto3==1.37.38",
+    "pydantic==2.11.3",
+    "pydantic-settings==2.8.1",
+    "python-dotenv==1.1.0",
+    "sqlalchemy==2.0.40",
+    "requests==2.32.3",
+    "msal==1.32.0",
+    "azure-identity==1.21.0",
+    "openai==1.75.0",
 ]
