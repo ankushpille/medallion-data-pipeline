@@ -13,6 +13,7 @@ from api.storage import router as storage_router
 from api.upload import router as upload_router
 from api.s3_injest import router as s3_router
 from api.discovery import router as discovery_router
+from api.auth import router as auth_router
 from core.logger import setup_logger
 from dotenv import load_dotenv
 from pathlib import Path
@@ -61,6 +62,7 @@ app.include_router(upload_router)       # Local File Upload
 app.include_router(s3_router)           # S3 Bucket Ingestion
 app.include_router(storage_router)     # Storage Explorer
 app.include_router(discovery_router)   # Pipeline Intelligence
+app.include_router(auth_router)        # Microsoft SSO
 
 # Serve React build (if present) as a single-page app. We check a few
 # common locations and mount the first existing build directory at '/'.

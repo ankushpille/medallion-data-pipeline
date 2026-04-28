@@ -1,17 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FiCloud, FiLock, FiSearch, FiX, FiZap } from 'react-icons/fi';
 import { motion } from 'framer-motion';
 import { apiUrl } from '../../hooks/useApi';
 
 const PORTALS = [
   { id: 'aws', label: 'AWS', authMode: 'credentials', icon: <FiCloud /> },
-  { id: 'azure', label: 'Azure', authMode: 'credentials', icon: <FiCloud /> },
+  { id: 'azure', label: 'Azure', authMode: 'sso', icon: <FiCloud /> },
   { id: 'fabric', label: 'Microsoft Fabric', authMode: 'sso', icon: <FiZap /> },
 ];
 
 const EMPTY_CREDS = {
   aws: { access_key: '', secret_key: '', region: '', role_arn: '' },
-  azure: { tenant_id: '', client_id: '', client_secret: '', subscription_id: '', resource_group: '' },
+  azure: { tenant_id: '', client_id: '', client_secret: '', subscription_id: '', resource_group: '', sso_token: '' },
   fabric: { sso_token: '' },
 };
 
@@ -22,7 +22,7 @@ function CredentialInput({ label, value, onChange, type = 'text', placeholder = 
       <input
         className="orch-input"
         type={type}
-        value={value}
+        value={value ?? ''}
         placeholder={placeholder}
         autoComplete="off"
         onChange={(e) => onChange(e.target.value)}
@@ -35,9 +35,25 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
   const [target, setTarget] = useState(initialTarget);
   const [credentials, setCredentials] = useState(EMPTY_CREDS);
   const [loading, setLoading] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState('');
+  const [ssoAccount, setSsoAccount] = useState(null);
+  const [authRequestId, setAuthRequestId] = useState('');
+  const [authStatus, setAuthStatus] = useState({
+    app_registration_configured: false,
+    azure_local_session_supported: true,
+    fabric_local_session_supported: true,
+    fabric_requires_token_or_app_registration: false,
+  });
 
   const selectedPortal = useMemo(() => PORTALS.find((p) => p.id === target), [target]);
+  const apiOrigin = useMemo(() => {
+    try {
+      return new URL(apiUrl('/')).origin;
+    } catch {
+      return window.location.origin;
+    }
+  }, []);
 
   const updateCredential = (key, value) => {
     setCredentials((prev) => ({
@@ -51,27 +67,153 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
     return Object.fromEntries(Object.entries(raw).filter(([, value]) => String(value || '').trim() !== ''));
   };
 
+  useEffect(() => {
+    const handleMessage = (event) => {
+      if (event.origin !== apiOrigin) return;
+      const payload = event.data || {};
+      if (payload.source !== 'dea-msal') return;
+
+      setSigningIn(false);
+      if (!payload.success || !payload.accessToken) {
+        setError(payload.error || 'Microsoft sign-in failed.');
+        return;
+      }
+
+      setError('');
+      setSsoAccount(payload.account || null);
+      setAuthRequestId('');
+      setCredentials((prev) => ({
+        ...prev,
+        [payload.target]: {
+          ...(prev[payload.target] || {}),
+          sso_token: payload.accessToken,
+        },
+      }));
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [apiOrigin]);
+
+  useEffect(() => {
+    if (!authRequestId || !signingIn) return undefined;
+
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(apiUrl(`/auth/microsoft/result?auth_request_id=${encodeURIComponent(authRequestId)}`));
+        const payload = await response.json();
+        if (!payload || payload.status === 'pending' || payload.status === 'unknown') return;
+
+        window.clearInterval(timer);
+        setSigningIn(false);
+        setAuthRequestId('');
+
+        if (!payload.success || !payload.accessToken) {
+          setError(payload.error || 'Microsoft sign-in failed.');
+          return;
+        }
+
+        setError('');
+        setSsoAccount(payload.account || null);
+        setCredentials((prev) => ({
+          ...prev,
+          [payload.target]: {
+            ...(prev[payload.target] || {}),
+            sso_token: payload.accessToken,
+          },
+        }));
+      } catch {
+        // ignore poll failures and keep waiting
+      }
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [authRequestId, signingIn]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(apiUrl('/auth/microsoft/status'))
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled) setAuthStatus(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const startMicrosoftSso = () => {
+    if (!authStatus.app_registration_configured) {
+      if (target === 'azure') {
+        setError(
+          authStatus.azure_local_session_supported
+            ? 'Azure app-registration SSO is not configured. This environment can still use your local Azure session via `az login`.'
+            : 'Azure SSO is not configured. Set AZURE_CLIENT_ID and AZURE_CLIENT_SECRET for your company Microsoft app registration.'
+        );
+      } else {
+        setError(
+          authStatus.fabric_local_session_supported
+            ? 'Fabric app-registration SSO is not configured. This environment can still try a local Azure session.'
+            : 'Fabric SSO is not configured. Set AZURE_CLIENT_ID and AZURE_CLIENT_SECRET for your company Microsoft app registration.'
+        );
+      }
+      return;
+    }
+
+    setError('');
+    setSigningIn(true);
+    fetch(apiUrl(`/auth/microsoft/start?target=${encodeURIComponent(target)}&origin=${encodeURIComponent(window.location.origin)}`))
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data?.login_url || !data?.auth_request_id) {
+          throw new Error('Microsoft sign-in could not be started.');
+        }
+        setAuthRequestId(data.auth_request_id);
+        const popup = window.open(data.login_url, 'dea-microsoft-sso', 'width=560,height=720');
+        if (!popup) {
+          setSigningIn(false);
+          setAuthRequestId('');
+          setError('Popup was blocked. Allow popups and try Microsoft sign-in again.');
+        }
+      })
+      .catch((ssoError) => {
+        setSigningIn(false);
+        setAuthRequestId('');
+        setError(ssoError?.message || 'Microsoft sign-in could not be started.');
+      });
+  };
+
   const runScan = async () => {
     if (!selectedClient) {
       setError('Select a client before scanning a cloud framework.');
       return;
     }
 
+    const requestCredentials = buildCredentials();
+    if (
+      target === 'fabric' &&
+      !requestCredentials.sso_token &&
+      !authStatus.app_registration_configured &&
+      !authStatus.fabric_local_session_supported
+    ) {
+      setError('Fabric scan requires Microsoft SSO. Configure AZURE_CLIENT_ID and AZURE_CLIENT_SECRET or provide a valid Fabric bearer token.');
+      return;
+    }
+
     setLoading(true);
     setError('');
     try {
-      const requestCredentials = buildCredentials();
-      const hasCredentials = Object.keys(requestCredentials).length > 0;
-      let authMode = selectedPortal?.authMode || 'credentials';
       const headers = { 'Content-Type': 'application/json' };
-      if (target === 'fabric' && requestCredentials.sso_token) {
+      let authMode = 'none';
+      if (requestCredentials.sso_token) {
         headers.Authorization = `Bearer ${requestCredentials.sso_token}`;
         delete requestCredentials.sso_token;
+        authMode = 'sso';
       }
-      if (!hasCredentials && target !== 'fabric') authMode = 'none';
-      if (target === 'fabric' && !hasCredentials) authMode = 'none';
-      const hasAwsKeys = target !== 'aws' || (requestCredentials.access_key && requestCredentials.secret_key);
-      const scanMode = hasCredentials && hasAwsKeys ? 'real' : 'mock';
+      if (Object.keys(requestCredentials).length > 0 && authMode !== 'sso') {
+        authMode = 'credentials';
+      }
 
       const response = await fetch(apiUrl('/discovery/analyze'), {
         method: 'POST',
@@ -79,7 +221,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         body: JSON.stringify({
           client_name: selectedClient,
           target,
-          scan_mode: scanMode,
+          scan_mode: 'live',
           auth_mode: authMode,
           credentials: requestCredentials,
           use_cloud_llm: useCloudLlm,
@@ -87,10 +229,18 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         }),
       });
 
-      if (!response.ok) throw new Error(`Scan failed with status ${response.status}`);
+      if (!response.ok) {
+        let message = `Scan failed with status ${response.status}`;
+        try {
+          const failure = await response.json();
+          message = failure.detail || failure.message || message;
+        } catch {}
+        throw new Error(message);
+      }
       const data = await response.json();
       onScanComplete(data);
       setCredentials(EMPTY_CREDS);
+      setSsoAccount(null);
       onClose();
     } catch (scanError) {
       setError(scanError?.message || 'Framework scan failed.');
@@ -143,23 +293,48 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
           )}
 
           {target === 'azure' && (
-            <div className="cloud-scan-form">
-              <CredentialInput label="Tenant ID" value={credentials.azure.tenant_id} onChange={(v) => updateCredential('tenant_id', v)} />
-              <CredentialInput label="Client ID" value={credentials.azure.client_id} onChange={(v) => updateCredential('client_id', v)} />
-              <CredentialInput label="Client Secret" type="password" value={credentials.azure.client_secret} onChange={(v) => updateCredential('client_secret', v)} />
-              <CredentialInput label="Subscription ID" value={credentials.azure.subscription_id} onChange={(v) => updateCredential('subscription_id', v)} />
-              <CredentialInput label="Resource Group" value={credentials.azure.resource_group} onChange={(v) => updateCredential('resource_group', v)} />
-            </div>
+            <>
+              <div className="cloud-scan-sso">
+                <button className="orch-btn primary" type="button" onClick={startMicrosoftSso} disabled={signingIn}>
+                  <FiLock style={{ marginRight: 8 }} />
+                  {signingIn ? 'Signing in...' : authStatus.app_registration_configured ? 'Sign in with Microsoft / Continue with SSO' : authStatus.azure_local_session_supported ? 'Use Local Azure Session' : 'Microsoft SSO Not Configured'}
+                </button>
+                <div className="step-sub">
+                  {authStatus.app_registration_configured
+                    ? 'Azure discovery uses your delegated Microsoft token when available. Service principal fields below remain as an optional fallback.'
+                    : authStatus.azure_local_session_supported
+                      ? 'Azure discovery can run from your existing local Azure session. Run `az login` on this machine, then use Run Framework Scan without popup sign-in.'
+                      : 'Azure discovery is configured for Microsoft SSO only. Add the backend Azure app registration settings before scanning.'}
+                </div>
+                {ssoAccount?.username && (
+                  <div className="step-sub">Connected as {ssoAccount.name || ssoAccount.username}.</div>
+                )}
+              </div>
+              <div className="cloud-scan-form">
+                <CredentialInput label="Tenant ID" value={credentials.azure.tenant_id} onChange={(v) => updateCredential('tenant_id', v)} />
+                <CredentialInput label="Client ID" value={credentials.azure.client_id} onChange={(v) => updateCredential('client_id', v)} />
+                <CredentialInput label="Client Secret" type="password" value={credentials.azure.client_secret} onChange={(v) => updateCredential('client_secret', v)} />
+                <CredentialInput label="Subscription ID" value={credentials.azure.subscription_id} onChange={(v) => updateCredential('subscription_id', v)} />
+                <CredentialInput label="Resource Group" value={credentials.azure.resource_group} onChange={(v) => updateCredential('resource_group', v)} />
+              </div>
+            </>
           )}
 
           {target === 'fabric' && (
             <div className="cloud-scan-sso">
-              <button className="orch-btn primary" type="button">
-                <FiLock style={{ marginRight: 8 }} /> Sign in with Microsoft / Continue with SSO
+              <button className="orch-btn primary" type="button" onClick={startMicrosoftSso} disabled={signingIn}>
+                <FiLock style={{ marginRight: 8 }} /> {signingIn ? 'Signing in...' : authStatus.app_registration_configured ? 'Sign in with Microsoft / Continue with SSO' : authStatus.fabric_local_session_supported ? 'Use Local Fabric Session' : 'Microsoft SSO Required'}
               </button>
               <div className="step-sub">
-                SSO is pluggable here. For local demos, paste an existing Fabric/Azure bearer token if available.
+                {authStatus.app_registration_configured
+                  ? 'Fabric discovery uses the same Microsoft sign-in flow. For local demos, you can still paste an existing Fabric bearer token.'
+                  : authStatus.fabric_local_session_supported
+                    ? 'Fabric discovery can use a local Azure identity session in this environment.'
+                    : 'Fabric discovery is configured to require Microsoft SSO or an explicit bearer token. Local machine session fallback is disabled.'}
               </div>
+              {ssoAccount?.username && (
+                <div className="step-sub">Connected as {ssoAccount.name || ssoAccount.username}.</div>
+              )}
               <CredentialInput label="Demo SSO Token" type="password" value={credentials.fabric.sso_token} onChange={(v) => updateCredential('sso_token', v)} />
             </div>
           )}

@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field
 from typing import Optional
 
 class Settings(BaseSettings):
@@ -13,9 +14,28 @@ class Settings(BaseSettings):
     AZURE_CONTAINER_NAME: Optional[str] = "datalake"        # main container (Raw/Bronze/Silver layers)
     ADLS_CONTAINER_NAME: Optional[str] = "landing"          # source landing container
     ADLS_ROOT_FOLDER: Optional[str] = None                   # virtual root prefix inside ADLS container
-    AZURE_TENANT_ID: Optional[str] = None
-    AZURE_CLIENT_ID: Optional[str] = None                   # Service Principal client id (optional)
-    AZURE_CLIENT_SECRET: Optional[str] = None               # Service Principal secret (optional)
+    AZURE_TENANT_ID: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_TENANT_ID", "TENANT_ID"),
+    )
+    AZURE_CLIENT_ID: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_CLIENT_ID", "CLIENT_ID"),
+    )                   # Service Principal client id (optional)
+    AZURE_CLIENT_SECRET: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_CLIENT_SECRET", "CLIENT_SECRET"),
+    )               # Service Principal secret (optional)
+    AZURE_AUTHORITY: Optional[str] = None
+    AZURE_REDIRECT_URI: Optional[str] = None
+    AZURE_SSO_SCOPES_AZURE: Optional[str] = "https://management.azure.com/user_impersonation"
+    AZURE_SSO_SCOPES_FABRIC: Optional[str] = "https://api.fabric.microsoft.com/Workspace.Read.All"
+    AZURE_ENABLE_LOCAL_SESSION_FALLBACK: bool = True
+    FABRIC_ENABLE_LOCAL_SESSION_FALLBACK: bool = False
+    AZURE_OPENAI_API_KEY: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_KEY"),
+    )
 
     # Email Settings (SMTP/Outlook)
     SMTP_SERVER: str = "smtp.office365.com"
