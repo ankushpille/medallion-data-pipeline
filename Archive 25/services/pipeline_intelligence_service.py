@@ -13,6 +13,7 @@ class DummySettings:
         creds = credentials or {}
         self.aws_access_key_id = creds.get("access_key") or creds.get("aws_access_key_id") or os.getenv("AWS_ACCESS_KEY_ID")
         self.aws_secret_access_key = creds.get("secret_key") or creds.get("aws_secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        self.aws_session_token = creds.get("session_token") or creds.get("aws_session_token") or os.getenv("AWS_SESSION_TOKEN")
         self.aws_region = creds.get("region") or os.getenv("AWS_REGION")
         self.aws_role_arn = creds.get("role_arn") or os.getenv("AWS_ROLE_ARN")
         self.azure_client_id = creds.get("client_id") or os.getenv("AZURE_CLIENT_ID")
@@ -88,6 +89,8 @@ def _flatten_assets(raw: Any) -> List[Dict[str, Any]]:
 
     def visit(value: Any, group: str = "asset"):
         if isinstance(value, dict):
+            if group in {"warnings", "errors", "_scan_meta", "framework", "source", "ingestion", "dq_rules"}:
+                return
             if "id" in value or "configuration" in value:
                 assets.append({
                     "type": group,
@@ -101,21 +104,58 @@ def _flatten_assets(raw: Any) -> List[Dict[str, Any]]:
             for item in value:
                 visit(item, group)
         elif value:
+            if group in {"warnings", "errors", "_scan_meta", "framework", "source", "ingestion", "dq_rules"}:
+                return
             assets.append({"type": group, "name": str(value), "configuration": {}})
 
     visit(raw)
     return assets
 
 
-def _build_config(client_name: str, target: str, file_types: List[str], delimiter_config: Dict[str, Any], assets: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _collect_list(raw: Any, key_name: str) -> List[Any]:
+    values: List[Any] = []
+
+    def visit(value: Any):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key == key_name and isinstance(nested, list):
+                    values.extend(nested)
+                else:
+                    visit(nested)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(raw)
+    return values
+
+
+def _first_s3_source_path(assets: List[Dict[str, Any]]) -> str:
+    for asset in assets:
+        if asset.get("type") != "s3":
+            continue
+        config = asset.get("configuration", {}) or {}
+        path = config.get("SuggestedPath")
+        if path:
+            return path
+        bucket = config.get("BucketName")
+        prefixes = config.get("Prefixes") or []
+        if bucket:
+            prefix = prefixes[0] if prefixes else ""
+            return f"s3://{bucket}/{prefix}".rstrip("/")
+    return ""
+
+
+def _build_config(client_name: str, target: str, file_types: List[str], delimiter_config: Dict[str, Any], assets: List[Dict[str, Any]], allow_demo_defaults: bool = True) -> Dict[str, Any]:
     source_type = "S3" if target == "aws" else "ADLS" if target == "azure" else "LOCAL"
-    source_path = (
-        "s3://dea-demo-landing/raw"
-        if target == "aws"
-        else "az://demo-landing-adls/raw"
-        if target == "azure"
-        else f"upload/{client_name}"
-    )
+    if target == "aws":
+        source_path = _first_s3_source_path(assets)
+        if not source_path and allow_demo_defaults:
+            source_path = "s3://dea-demo-landing/raw"
+    elif target == "azure":
+        source_path = "az://demo-landing-adls/raw" if allow_demo_defaults else ""
+    else:
+        source_path = f"upload/{client_name}" if allow_demo_defaults else ""
     return {
         "client_name": client_name,
         "source_type": source_type,
@@ -230,9 +270,14 @@ async def analyze_pipeline_live(
     target_key = _normalize_target(target, providers)
     provider_list = [p.strip().lower() for p in providers.split(",")] if providers else [target_key]
     has_request_credentials = bool(credentials) or bool(authorization_token)
-    resolved_auth_mode = auth_mode or ("sso" if target_key == "fabric" and authorization_token else "credentials" if has_request_credentials else "none")
+    role_arn = (credentials or {}).get("role_arn") or getattr(settings, "aws_role_arn", None)
+    resolved_auth_mode = auth_mode or ("sso" if target_key == "fabric" and authorization_token else "assumed_role" if target_key == "aws" and role_arn else "credentials" if has_request_credentials else "none")
+    if target_key == "aws" and role_arn and has_request_credentials:
+        resolved_auth_mode = "assumed_role"
     scan_status = "success"
     is_fallback = False
+    warnings: List[str] = []
+    errors: List[str] = []
 
     live_data = None
     try:
@@ -246,11 +291,29 @@ async def analyze_pipeline_live(
         logger.warning(f"Live scan failed: {e}. Using rule-based fallback.")
         scan_status = "partial"
         is_fallback = True
+        errors.append(f"{target_key.upper()} scan failed: {e.__class__.__name__}")
 
-    if not live_data or not _flatten_assets(live_data):
+    warnings = [str(w) for w in _collect_list(live_data, "warnings")]
+    errors.extend([str(e) for e in _collect_list(live_data, "errors")])
+    scan_meta = _collect_list(live_data, "_scan_meta")
+    auth_failed = any(isinstance(m, dict) and m.get("auth_failed") for m in scan_meta)
+
+    if target_key == "aws" and has_request_credentials and auth_failed:
+        scan_status = "failed"
+        is_fallback = False
+        live_data = live_data or {"raw_cloud_dump": [{}]}
+    elif (not live_data or not _flatten_assets(live_data)) and not has_request_credentials:
         live_data = _fallback_raw_assets(target_key)
         scan_status = "partial"
         is_fallback = True
+    elif not live_data or not _flatten_assets(live_data):
+        scan_status = "partial"
+        is_fallback = False
+        live_data = live_data or {"raw_cloud_dump": [{}]}
+        if not warnings and not errors:
+            warnings.append(f"No accessible {target_key.upper()} resources were discovered with the provided credentials.")
+    elif warnings and scan_status == "success":
+        scan_status = "partial"
 
     combined_text = json.dumps(live_data).lower() if live_data else ""
     
@@ -272,7 +335,9 @@ async def analyze_pipeline_live(
     streaming = any(ext in combined_text for ext in ["kafka", "eventhub", "stream", "kinesis"])
     batch = any(ext in combined_text for ext in ["foreach", "until", "loop", "batch", "lambda"])
     
-    if not any([file_based, api_based, database]):
+    if scan_status == "failed":
+        file_based = api_based = database = streaming = batch = False
+    elif not any([file_based, api_based, database]):
         file_based = True 
         batch = True
 
@@ -282,7 +347,9 @@ async def analyze_pipeline_live(
     if "json" in combined_text: file_types.append("JSON")
     if "parquet" in combined_text: file_types.append("Parquet")
     if "excel" in combined_text: file_types.append("Excel")
-    if not file_types:
+    if scan_status == "failed":
+        file_types = []
+    elif not file_types and (is_fallback or not has_request_credentials):
         file_types = ["CSV", "JSON", "Parquet"] # Provide common defaults
         
     # 4. Delimiter Config
@@ -341,7 +408,7 @@ async def analyze_pipeline_live(
         "llm_provider": llm_provider,
         "scan_mode": scan_mode,
     }
-    reformatted_config = _build_config(client_name, target_key, file_types, delimiter_config, discovered_assets)
+    reformatted_config = _build_config(client_name, target_key, file_types, delimiter_config, discovered_assets, allow_demo_defaults=is_fallback or not has_request_credentials)
     ingestion_details = {
         "target": target_key,
         "source_type": reformatted_config["source_type"],
@@ -354,6 +421,8 @@ async def analyze_pipeline_live(
         "auth_mode": resolved_auth_mode,
         "scan_status": scan_status,
         "is_fallback": is_fallback,
+        "warnings": warnings,
+        "errors": errors,
         "discovered_assets": discovered_assets,
         "data_pipelines": data_pipelines,
         "source_systems": source_systems,
@@ -376,5 +445,14 @@ async def analyze_pipeline_live(
         result = _merge_llm_overlay(result, _cloud_llm_extract(result))
     else:
         result["llm_summary"] = "GPT extraction not requested; rule-based extraction used."
+
+    if target_key == "aws" and has_request_credentials and not is_fallback:
+        real_source_path = reformatted_config.get("source_path") or ""
+        result.setdefault("reformatted_config", {})
+        result["reformatted_config"]["source_type"] = "S3"
+        result["reformatted_config"]["source_path"] = real_source_path
+        result.setdefault("ingestion_details", {})
+        result["ingestion_details"]["source_type"] = "S3"
+        result["ingestion_details"]["source_path"] = real_source_path
 
     return result

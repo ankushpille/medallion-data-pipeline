@@ -240,6 +240,30 @@
   border-radius: 8px;
 }
 
+.pi-alert {
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pi-alert.warning {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.pi-alert.error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.pi-alert ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
 .pi-section-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));

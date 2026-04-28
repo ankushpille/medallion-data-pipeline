@@ -1,265 +1,246 @@
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 from .base import CloudScanner
-from engine.analyzer.code_analyzer import CodeIntelligenceEngine
 
 try:
     import boto3
-    from botocore.exceptions import BotoCoreError, ClientError
+    from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, PartialCredentialsError
 except ImportError:
     boto3 = None
+    BotoCoreError = ClientError = NoCredentialsError = PartialCredentialsError = Exception
 
 logger = logging.getLogger("pipeline_ie.scanner.aws")
+
+
+FILE_EXTENSIONS = {"csv", "json", "parquet"}
+
 
 class AWSScanner(CloudScanner):
     def can_scan(self, settings: Any) -> bool:
         return bool(settings.aws_access_key_id and settings.aws_secret_access_key)
 
-    def scan(self, settings: Any, **kwargs) -> Dict[str, List[str]]:
-        raw_assets: Dict[str, List[str]] = {}
-        
+    def scan(self, settings: Any, **kwargs) -> Dict[str, List[Any]]:
+        warnings: List[str] = []
+        errors: List[str] = []
+        raw_assets: Dict[str, List[Any]] = {"s3": [], "glue_jobs": [], "glue_databases": [], "glue_tables": []}
+
         if not boto3:
-            logger.error("boto3 not installed.")
-            return {"raw_cloud_dump": ["Boto3 missing"]}
+            return {
+                "raw_cloud_dump": [raw_assets],
+                "warnings": [],
+                "errors": ["boto3 is not installed; AWS live scan cannot run."],
+                "_scan_meta": [{"auth_failed": True, "assumed_role": False}],
+            }
+
+        region = getattr(settings, "aws_region", None) or "us-east-1"
+        role_arn = getattr(settings, "aws_role_arn", None)
 
         try:
-            # 1. Establish initial session
-            base_session = boto3.Session(
-                aws_access_key_id=settings.aws_access_key_id,
-                aws_secret_access_key=settings.aws_secret_access_key,
-                region_name="us-east-1"
-            )
+            session, assumed_role = self._build_session(settings, region, role_arn)
+            sts = session.client("sts", region_name=region)
+            identity = sts.get_caller_identity()
+            account_id = identity.get("Account")
+            logger.info("AWS scan authenticated successfully. region=%s auth_mode=%s account=%s", region, "assumed_role" if assumed_role else "credentials", account_id)
+        except (ClientError, NoCredentialsError, PartialCredentialsError, BotoCoreError) as exc:
+            return {
+                "raw_cloud_dump": [raw_assets],
+                "warnings": [],
+                "errors": [self._safe_aws_error("AWS authentication failed", exc)],
+                "_scan_meta": [{"auth_failed": True, "assumed_role": bool(role_arn), "region": region}],
+            }
+        except Exception as exc:
+            return {
+                "raw_cloud_dump": [raw_assets],
+                "warnings": [],
+                "errors": [f"AWS authentication failed: {exc.__class__.__name__}"],
+                "_scan_meta": [{"auth_failed": True, "assumed_role": bool(role_arn), "region": region}],
+            }
 
-            # 2. Discover all active global regions dynamically
+        self._scan_s3(session, region, raw_assets, warnings)
+        self._scan_glue(session, region, raw_assets, warnings)
+
+        return {
+            "raw_cloud_dump": [raw_assets],
+            "warnings": warnings,
+            "errors": errors,
+            "_scan_meta": [{
+                "auth_failed": False,
+                "assumed_role": assumed_role,
+                "region": region,
+                "account_id": account_id,
+                "s3_bucket_count": len(raw_assets["s3"]),
+                "glue_job_count": len(raw_assets["glue_jobs"]),
+                "glue_database_count": len(raw_assets["glue_databases"]),
+                "glue_table_count": len(raw_assets["glue_tables"]),
+            }],
+        }
+
+    def _build_session(self, settings: Any, region: str, role_arn: str | None) -> Tuple[Any, bool]:
+        base_session = boto3.Session(
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            aws_session_token=getattr(settings, "aws_session_token", None),
+            region_name=region,
+        )
+
+        if not role_arn:
+            return base_session, False
+
+        sts = base_session.client("sts", region_name=region)
+        assumed = sts.assume_role(RoleArn=role_arn, RoleSessionName="dea-framework-scan")
+        creds = assumed["Credentials"]
+        return boto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=region,
+        ), True
+
+    def _scan_s3(self, session: Any, region: str, raw_assets: Dict[str, List[Any]], warnings: List[str]) -> None:
+        s3 = session.client("s3", region_name=region)
+        try:
+            buckets = s3.list_buckets().get("Buckets", [])
+        except ClientError as exc:
+            warnings.append(self._safe_aws_error("S3 scan skipped due to AccessDenied or missing permission", exc))
+            return
+
+        for bucket in buckets:
+            name = bucket.get("Name")
+            if not name:
+                continue
+
+            bucket_region = region
+            prefixes: List[str] = []
+            sample_keys: List[str] = []
+            file_types = set()
+            suggested_prefix = ""
+
             try:
-                ec2 = base_session.client("ec2")
-                regions = [region['RegionName'] for region in ec2.describe_regions()['Regions']]
-            except Exception as e:
-                logger.warning(f"Could not describe global regions, defaulting to us-east-1. Reason: {e}")
-                regions = ["us-east-1"]
+                location = s3.get_bucket_location(Bucket=name).get("LocationConstraint")
+                bucket_region = location or "us-east-1"
+            except ClientError as exc:
+                warnings.append(self._safe_aws_error(f"S3 bucket region lookup skipped for {name}", exc))
 
-            # 3. Iterate over ALL regions exhaustively
-            for region in regions:
-                region_session = boto3.Session(
-                    aws_access_key_id=settings.aws_access_key_id,
-                    aws_secret_access_key=settings.aws_secret_access_key,
-                    region_name=region
-                )
-                
-                # S3 Discovery
-                try:
-                    s3 = region_session.client("s3")
-                    if "s3" not in raw_assets: raw_assets["s3"] = []
-                    if region == "us-east-1":
-                        buckets = s3.list_buckets().get("Buckets", [])
-                        for b in buckets:
-                            b_name = b.get('Name')
-                            # Deep S3 Inspection
-                            config = {
-                                "CreationDate": str(b.get('CreationDate', '')),
-                                "StorageClass": "Standard",
-                                "IsPublic": "Check Failure"
-                            }
-                            # Fetch Public Access Block Status
-                            try:
-                                pab = s3.get_public_access_block(Bucket=b_name).get('PublicAccessBlockConfiguration', {})
-                                config["IsPublic"] = str(not all(pab.values()))
-                                config["PublicAccessBlock"] = pab
-                            except: pass
-                            
-                            # Fetch Policy Summary
-                            try:
-                                policy = s3.get_bucket_policy(Bucket=b_name).get('Policy')
-                                if policy:
-                                    config["HasPolicy"] = True
-                                    config["PolicyLength"] = len(policy)
-                            except: pass
-                            
-                            try:
-                                v_status = s3.get_bucket_versioning(Bucket=b_name).get('Status', 'Disabled')
-                                config["Versioning"] = v_status
-                            except Exception: pass
-                            
-                            try:
-                                enc = s3.get_bucket_encryption(Bucket=b_name).get('ServerSideEncryptionConfiguration', {})
-                                config["Encryption"] = "Enabled" if enc else "Disabled"
-                            except Exception: config["Encryption"] = "Disabled"
+            bucket_client = session.client("s3", region_name=bucket_region)
 
-                            raw_assets["s3"].append({
-                                "id": f"{region} || {b['Name']}",
-                                "configuration": config
-                            })
-                except Exception: pass
+            try:
+                root = bucket_client.list_objects_v2(Bucket=name, MaxKeys=50, Delimiter="/")
+                prefixes = [p.get("Prefix", "") for p in root.get("CommonPrefixes", []) if p.get("Prefix")]
+                contents = root.get("Contents", [])
+                sample_keys.extend([obj.get("Key") for obj in contents if obj.get("Key")])
 
-                # API Gateway Discovery
-                try:
-                    apigw = region_session.client("apigateway")
-                    if "apigateway" not in raw_assets: raw_assets["apigateway"] = []
-                    apis = apigw.get_rest_apis().get("items", [])
-                    for api in apis:
-                        api_id = api['id']
-                        source_urls = []
-                        
-                        try:
-                            # Extract native REST Integration URLs to pinpoint data sources
-                            resources = apigw.get_resources(restApiId=api_id).get('items', [])
-                            api_methods = []
-                            api_integrations = []
-                            api_auth = "NONE"
-                            
-                            for res in resources:
-                                res_path = res.get('path', '/')
-                                for method, method_info in res.get('resourceMethods', {}).items():
-                                    if method == 'OPTIONS': continue
-                                    api_methods.append(method)
-                                    
-                                    # Auth check
-                                    auth_type = method_info.get('authorizationType', 'NONE')
-                                    if auth_type != 'NONE': api_auth = auth_type
-                                    
-                                    try:
-                                        integ = apigw.get_integration(restApiId=api_id, resourceId=res['id'], httpMethod=method)
-                                        # Track integrations
-                                        integ_type = integ.get('type')
-                                        integ_uri = integ.get('uri', '')
-                                        api_integrations.append({
-                                            "path": res_path,
-                                            "method": method,
-                                            "type": integ_type,
-                                            "uri": integ_uri
-                                        })
-                                        if 'uri' in integ and 'amazonaws.com' not in integ['uri']:
-                                            source_urls.append(integ['uri'])
-                                    except Exception: pass
-                        except Exception as e:
-                            logger.debug(f"Integration extraction skipped for {api_id}: {e}")
-                            
-                        # Stage discovery
-                        stages = []
-                        try:
-                            stages = [s['stageName'] for s in apigw.get_stages(restApiId=api_id).get('item', [])]
-                        except Exception: pass
+                scan_prefixes = prefixes[:5] if prefixes else [""]
+                for prefix in scan_prefixes:
+                    page = bucket_client.list_objects_v2(Bucket=name, Prefix=prefix, MaxKeys=50)
+                    for obj in page.get("Contents", []):
+                        key = obj.get("Key")
+                        if not key:
+                            continue
+                        if key not in sample_keys:
+                            sample_keys.append(key)
+                        ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+                        if ext in FILE_EXTENSIONS:
+                            file_types.add(ext.upper())
+                            if not suggested_prefix:
+                                suggested_prefix = prefix or self._prefix_from_key(key)
+            except ClientError as exc:
+                warnings.append(self._safe_aws_error(f"S3 object listing skipped for {name}", exc))
 
-                        raw_assets["apigateway"].append({
-                            "id": f"{region} || {api['name']}",
-                            "configuration": {
-                                "PublicInvokeURL": f"https://{api_id}.execute-api.{region}.amazonaws.com/prod",
-                                "EndpointType": api.get('endpointConfiguration', {}).get('types', ['EDGE'])[0],
-                                "Version": str(api.get('version', 'v1')),
-                                "CreatedDate": str(api.get('createdDate', '')),
-                                "SourceIntegrationURLs": source_urls if source_urls else ["Unknown/Internal"],
-                                "Methods": list(set(api_methods)),
-                                "Integrations": api_integrations,
-                                "AuthType": api_auth,
-                                "Stages": stages
-                            }
-                        })
-                except Exception: pass
+            if not suggested_prefix and prefixes:
+                suggested_prefix = prefixes[0]
 
-                # Lambda Deep Inspection
-                try:
-                    lambda_client = region_session.client("lambda")
-                    if "lambda" not in raw_assets: raw_assets["lambda"] = []
-                    funcs = lambda_client.list_functions().get("Functions", [])
-                    analyzer = CodeIntelligenceEngine()
+            raw_assets["s3"].append({
+                "id": f"aws || {name}",
+                "configuration": {
+                    "BucketName": name,
+                    "Region": bucket_region,
+                    "CreationDate": str(bucket.get("CreationDate", "")),
+                    "Prefixes": prefixes,
+                    "SampleObjectKeys": sample_keys[:25],
+                    "DetectedFileTypes": sorted(file_types),
+                    "SuggestedPath": f"s3://{name}/{suggested_prefix}".rstrip("/"),
+                },
+            })
 
-                    for f in funcs:
-                        targets = []
-                        code_evidence = []
-                        confidence = "LOW"
-                        
-                        env = f.get("Environment", {}).get("Variables", {})
-                        for k, v in env.items():
-                            if "BUCKET" in k.upper() or "TABLE" in k.upper() or "QUEUE" in k.upper() or "URL" in k.upper():
-                                targets.append(v)
-                        
-                        if targets: confidence = "MEDIUM"
+    def _scan_glue(self, session: Any, region: str, raw_assets: Dict[str, List[Any]], warnings: List[str]) -> None:
+        glue = session.client("glue", region_name=region)
 
-                        # Deep Code AST Parse
-                        findings = {}
-                        try:
-                            # Requires lambda:GetFunction perms. If we get the presigned URL, we analyze AST
-                            fn_info = lambda_client.get_function(FunctionName=f['FunctionName'])
-                            code_loc = fn_info.get('Code', {}).get('Location')
-                            if code_loc:
-                                findings = analyzer.analyze_presigned_url(code_loc)
-                                if findings.get("targets"):
-                                    targets.extend(findings["targets"])
-                                    confidence = "HIGH"
-                                if findings.get("evidence"):
-                                    code_evidence.extend(findings["evidence"])
-                        except Exception as ce:
-                            logger.debug(f"Could not analyze lambda code for {f['FunctionName']}: {ce}")
+        try:
+            paginator = glue.get_paginator("get_jobs")
+            for page in paginator.paginate():
+                for job in page.get("Jobs", []):
+                    command = job.get("Command", {}) or {}
+                    raw_assets["glue_jobs"].append({
+                        "id": f"aws-glue-job || {job.get('Name')}",
+                        "configuration": {
+                            "Name": job.get("Name"),
+                            "Role": job.get("Role"),
+                            "CommandName": command.get("Name"),
+                            "ScriptLocation": command.get("ScriptLocation"),
+                            "GlueVersion": job.get("GlueVersion"),
+                            "CreatedOn": str(job.get("CreatedOn", "")),
+                            "LastModifiedOn": str(job.get("LastModifiedOn", "")),
+                            "MaxCapacity": job.get("MaxCapacity"),
+                            "WorkerType": job.get("WorkerType"),
+                            "NumberOfWorkers": job.get("NumberOfWorkers"),
+                        },
+                    })
+        except ClientError as exc:
+            warnings.append(self._safe_aws_error("Glue jobs scan skipped due to AccessDenied or missing permission", exc))
 
-                        # Fetch Event Source Mappings (Triggers)
-                        event_triggers = []
-                        try:
-                            paginator = lambda_client.get_paginator('list_event_source_mappings')
-                            for page in paginator.paginate(FunctionName=f['FunctionName']):
-                                for mapping in page.get('EventSourceMappings', []):
-                                    src_arn = mapping.get('EventSourceArn', '')
-                                    if src_arn:
-                                        trigger_type = src_arn.split(':')[2].upper()
-                                        event_triggers.append(trigger_type)
-                        except Exception: pass
+        try:
+            db_paginator = glue.get_paginator("get_databases")
+            for db_page in db_paginator.paginate():
+                for database in db_page.get("DatabaseList", []):
+                    db_name = database.get("Name")
+                    raw_assets["glue_databases"].append({
+                        "id": f"aws-glue-database || {db_name}",
+                        "configuration": {
+                            "Name": db_name,
+                            "Description": database.get("Description"),
+                            "LocationUri": database.get("LocationUri"),
+                            "CreateTime": str(database.get("CreateTime", "")),
+                        },
+                    })
 
-                        raw_assets["lambda"].append({
-                            "id": f"{region} || {f['FunctionName']}",
-                            "env_targets": list(set(targets)),
-                            "code_evidence": code_evidence,
-                            "confidence": confidence,
-                            "configuration": {
-                                "Runtime": f.get("Runtime", "unknown"),
-                                "MemorySizeMB": f.get("MemorySize", 128),
-                                "TimeoutSeconds": f.get("Timeout", 3),
-                                "Handler": f.get("Handler", ""),
-                                "EphemeralStorage": f.get("EphemeralStorage", {}).get("Size", 512),
-                                "Architecture": f.get("Architectures", ["x86_64"])[0],
-                                "EnvironmentKeys": list(env.keys()),
-                                "IngestionTargets": list(set(targets)) if targets else ["S3 Storage Layer (Heuristic mapping)"],
-                                "IngestionOperations": list(set(findings.get("operations", []))) if findings.get("operations") else ["Unknown"],
-                                "DataFormats": list(set(findings.get("data_formats", []))) if findings.get("data_formats") else ["Unknown"],
-                                "VerifiedTriggers": list(set(event_triggers))
-                            }
-                        })
-                except Exception: pass
-                
-                # Glue Deep Inspection
-                try:
-                    glue = region_session.client("glue")
-                    if "glue" not in raw_assets: raw_assets["glue"] = []
-                    jobs = glue.get_jobs().get("Jobs", [])
-                    for j in jobs:
-                        raw_assets["glue"].append({
-                            "id": f"{region} || {j['Name']}",
-                            "configuration": {
-                                "GlueVersion": j.get("GlueVersion", "1.0"),
-                                "MaxCapacity": j.get("MaxCapacity", 10.0),
-                                "TimeoutMinutes": j.get("Timeout", 2880),
-                                "CommandScript": j.get("Command", {}).get("ScriptLocation", "Unknown")
-                            }
-                        })
-                except Exception as e: pass
+                    try:
+                        table_paginator = glue.get_paginator("get_tables")
+                        for table_page in table_paginator.paginate(DatabaseName=db_name):
+                            for table in table_page.get("TableList", []):
+                                storage = table.get("StorageDescriptor", {}) or {}
+                                raw_assets["glue_tables"].append({
+                                    "id": f"aws-glue-table || {db_name}.{table.get('Name')}",
+                                    "configuration": {
+                                        "DatabaseName": db_name,
+                                        "Name": table.get("Name"),
+                                        "TableType": table.get("TableType"),
+                                        "Location": storage.get("Location"),
+                                        "InputFormat": storage.get("InputFormat"),
+                                        "OutputFormat": storage.get("OutputFormat"),
+                                        "Columns": [
+                                            {"Name": col.get("Name"), "Type": col.get("Type")}
+                                            for col in storage.get("Columns", [])
+                                        ],
+                                        "CreateTime": str(table.get("CreateTime", "")),
+                                        "UpdateTime": str(table.get("UpdateTime", "")),
+                                    },
+                                })
+                    except ClientError as exc:
+                        warnings.append(self._safe_aws_error(f"Glue tables scan skipped for database {db_name}", exc))
+        except ClientError as exc:
+            warnings.append(self._safe_aws_error("Glue databases scan skipped due to AccessDenied or missing permission", exc))
 
-                # General Tagged Discovery Fallback
-                try:
-                    tagging_client = region_session.client('resourcegroupstaggingapi')
-                    for page in tagging_client.get_paginator('get_resources').paginate():
-                        for resource in page.get('ResourceTagMappingList', []):
-                            arn = resource.get('ResourceARN', '')
-                            parts = arn.split(':')
-                            if len(parts) >= 3:
-                                service = parts[2]
-                                if service not in raw_assets:
-                                    raw_assets[service] = []
-                                if len(raw_assets[service]) < 50:
-                                    identifier = parts[-1].split('/')[-1] if '/' in parts[-1] else parts[-1]
-                                    # Fallback uses strings to prevent breaking, but structured services use dicts
-                                    raw_assets[service].append({"id": f"{region} || {identifier}"})
-                except Exception as e:
-                    logger.debug(f"Resource Tagging API failed in {region}: {e}")
+    @staticmethod
+    def _prefix_from_key(key: str) -> str:
+        if "/" not in key:
+            return ""
+        return key.rsplit("/", 1)[0] + "/"
 
-        except Exception as e:
-            logger.error(f"Global AWS Scan failed: {e}")
-            
-        return {"raw_cloud_dump": [raw_assets]}
+    @staticmethod
+    def _safe_aws_error(prefix: str, exc: Exception) -> str:
+        if isinstance(exc, ClientError):
+            err = exc.response.get("Error", {})
+            code = err.get("Code", "ClientError")
+            message = err.get("Message", "")
+            return f"{prefix}: {code} - {message}"
+        return f"{prefix}: {exc.__class__.__name__}"

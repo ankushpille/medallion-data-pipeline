@@ -21,6 +21,18 @@ function Tag({ active, children }) {
   return <span className={`pi-tag ${active === false ? 'inactive' : 'active'}`}>{children}</span>;
 }
 
+function AlertList({ title, items, tone = 'warning' }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div className={`pi-alert ${tone}`}>
+      <strong>{title}</strong>
+      <ul>
+        {items.map((item, idx) => <li key={`${title}-${idx}`}>{item}</li>)}
+      </ul>
+    </div>
+  );
+}
+
 export default function PipelineIntelligence({ clientName, initialData, onScanComplete, onConfirm }) {
   const [data, setData] = useState(initialData || null);
   const [loading, setLoading] = useState(false);
@@ -110,7 +122,11 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
               <div className="pi-card-content pi-framework">{data.framework || 'Unknown'}</div>
               <div className="pi-card-content" style={{ marginTop: 8, fontSize: 12 }}>
                 Status: {data.scan_status || 'success'} · Auth: {data.auth_mode || 'none'}
-                {data.is_fallback ? ' · Fallback response' : ''}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <span className={`pi-tag ${data.is_fallback ? 'inactive' : 'active'}`}>
+                  {data.is_fallback ? 'Demo/Fallback Scan' : 'Real Scan'}
+                </span>
               </div>
             </div>
 
@@ -170,6 +186,9 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
             </div>
           </div>
 
+          <AlertList title="Warnings" items={data.warnings || []} />
+          <AlertList title="Errors" items={data.errors || []} tone="error" />
+
           {data.llm_summary && (
             <div className="pi-card">
               <div className="pi-card-title">GPT Summary</div>
@@ -219,7 +238,7 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
           </div>
 
           <div className="pi-actions">
-            <button className="pi-btn-confirm" onClick={() => onConfirm(data)}>
+            <button className="pi-btn-confirm" onClick={() => onConfirm(data)} disabled={data.scan_status === 'failed'}>
               <FiCheck /> Review Data Sources
             </button>
           </div>
