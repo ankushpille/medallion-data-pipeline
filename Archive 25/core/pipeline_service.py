@@ -31,6 +31,7 @@ class PipelineService:
             "bronze": {"rows_written": 0},
             "dq": {"failed_rows": 0, "warnings": 0},
             "silver": {"rows_written": 0},
+            "gold": {"rows_written": 0, "status": "PENDING"},
         }
         batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         try:
@@ -122,6 +123,7 @@ class PipelineService:
                 _mc_for_silver.load_type = mc_row.get("load_type")
             written, silver_keys = self._write_silver(valid_df, _mc_for_silver, batch_id)
             metrics["silver"]["rows_written"] = int(written)
+            logger.info(f"Silver completion for {dataset_id}: rows_written={written}, files={len(silver_keys)}")
             if invalid_df.shape[0] > 0:
                 try:
                     rkey = self._write_rejected(invalid_df, _mc_for_silver, batch_id)
@@ -129,12 +131,29 @@ class PipelineService:
                 except Exception as e:
                     logger.warning(f"rejected write failed: {e}")
 
+            gold_keys = []
+            try:
+                logger.info(f"Gold trigger for {dataset_id}: silver_rows={written}")
+                if int(written) > 0 and not valid_df.empty:
+                    gold_written, gold_keys = self._write_gold(valid_df, _mc_for_silver, batch_id)
+                    metrics["gold"]["rows_written"] = int(gold_written)
+                    metrics["gold"]["status"] = "PASSED"
+                    logger.info(f"Gold execution result for {dataset_id}: PASSED rows_written={gold_written}, files={len(gold_keys)}")
+                else:
+                    metrics["gold"]["status"] = "SKIPPED"
+                    metrics["gold"]["reason"] = "No clean Silver rows available for Gold publishing"
+                    logger.info(f"Gold execution result for {dataset_id}: SKIPPED - no clean Silver rows")
+            except Exception as e:
+                metrics["gold"]["status"] = "FAILED"
+                metrics["gold"]["reason"] = str(e)
+                logger.error(f"Gold execution result for {dataset_id}: FAILED - {e}")
+
             try:
                 client_name = (mc.client_name if mc else mc_row.get("client_name", "")) or ""
-                metrics["paths"] = {"bronze": bronze_key, "silver": silver_keys, "rejected": rejected_keys}
+                metrics["paths"] = {"bronze": bronze_key, "silver": silver_keys, "gold": gold_keys, "rejected": rejected_keys}
                 metrics["dq_details"] = dq_details
                 if not suppress_email:
-                    html = self._compose_success_report(dataset_id, client_name, metrics, bronze_key, silver_keys, rejected_keys, dq_details)
+                    html = self._compose_success_report(dataset_id, client_name, metrics, bronze_key, silver_keys, gold_keys, rejected_keys, dq_details)
                     self.notifier.send_email_html(f"Pipeline Success: {dataset_id}", html)
             except Exception as e:
                 logger.warning(f"success email failed: {e}")
@@ -418,6 +437,36 @@ class PipelineService:
                 self.notifier.send_email(subject, body)
             raise
 
+    def _write_gold(self, df: pd.DataFrame, mc: MasterConfigAuthoritative, batch_id: str) -> Tuple[int, List[str]]:
+        """
+        Default Gold behavior: publish the clean Silver dataframe into Gold.
+        This keeps the medallion flow complete even when no domain-specific
+        aggregation has been configured yet.
+        """
+        bkt = self.bucket
+        client = (mc.client_name or "").strip("/")
+        folder = self._clean_folder_path(mc.source_folder)
+        base = (mc.source_object or "").rsplit(".", 1)[0]
+        ts = datetime.utcnow().strftime("%B_%d_%H")
+        if df.empty:
+            return 0, []
+        key = f"Gold/{client}/{folder}/{ts}/{base}.parquet"
+        buf = io.BytesIO()
+        table = self._to_arrow(df)
+        import pyarrow.parquet as pq
+        pq.write_table(table, buf)
+        buf.seek(0)
+        try:
+            self.s3.put_object(Container=bkt, Key=key, Body=buf.getvalue())
+            logger.info(f"Gold Write SUCCESS: {key} ({len(df)} rows)")
+            return int(df.shape[0]), [key]
+        except Exception as e:
+            subject = f"Pipeline Error: {mc.dataset_id} - Gold"
+            body = f"Reason: {str(e)}"
+            if not getattr(self, "_suppress_email", False):
+                self.notifier.send_email(subject, body)
+            raise
+
     def _write_partitioned(self, df: pd.DataFrame, bucket: str, prefix: str, part_col: str, batch_id: str, base_name: str) -> Tuple[int, List[str]]:
         total = 0
         keys: List[str] = []
@@ -579,13 +628,16 @@ class PipelineService:
         <ul>{w_html}</ul>
         """
         return html
-    def _compose_success_report(self, dataset_id: str, client_name: str, metrics: Dict, bronze_key: str, silver_keys: List[str], rejected_keys: List[str], dq_details: Dict) -> str:
+    def _compose_success_report(self, dataset_id: str, client_name: str, metrics: Dict, bronze_key: str, silver_keys: List[str], gold_keys: List[str], rejected_keys: List[str], dq_details: Dict) -> str:
         rows_raw = metrics.get("raw", {}).get("rows_read", 0)
         rows_bronze = metrics.get("bronze", {}).get("rows_written", 0)
         dq_failed = metrics.get("dq", {}).get("failed_rows", 0)
         dq_warn = metrics.get("dq", {}).get("warnings", 0)
         rows_silver = metrics.get("silver", {}).get("rows_written", 0)
+        rows_gold = metrics.get("gold", {}).get("rows_written", 0)
+        gold_status = metrics.get("gold", {}).get("status", "PENDING")
         sil_html = "".join([f"<li>{k}</li>" for k in silver_keys]) or "<li>None</li>"
+        gold_html = "".join([f"<li>{k}</li>" for k in gold_keys]) or "<li>None</li>"
         rej_html = "".join([f"<li>{k}</li>" for k in rejected_keys]) or "<li>None</li>"
         v_html = "".join([f"<li>{d['rule']} on {d['column']} (count={d['count']}) samples={', '.join(d['samples'])}</li>" for d in dq_details.get("violations", [])]) or "<li>None</li>"
         w_html = "".join([f"<li>{d['rule']} on {d['column']} (count={d['count']}) samples={', '.join(d['samples'])}</li>" for d in dq_details.get("warnings", [])]) or "<li>None</li>"
@@ -600,11 +652,14 @@ class PipelineService:
           <li>DQ failed rows: {dq_failed}</li>
           <li>DQ warnings: {dq_warn}</li>
           <li>Silver rows written: {rows_silver}</li>
+          <li>Gold rows written: {rows_gold} ({gold_status})</li>
         </ul>
         <h3>Outputs</h3>
         <p><strong>Bronze:</strong> {bronze_key}</p>
         <p><strong>Silver Files:</strong></p>
         <ul>{sil_html}</ul>
+        <p><strong>Gold Files:</strong></p>
+        <ul>{gold_html}</ul>
         <p><strong>Rejected Files:</strong></p>
         <ul>{rej_html}</ul>
         <h3>DQ Details</h3>

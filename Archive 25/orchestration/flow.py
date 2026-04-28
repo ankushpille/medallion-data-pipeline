@@ -125,7 +125,8 @@ def _discover(state: Dict) -> Dict:
                         "Master Configuration": {"status": "PENDING"},
                         "DQ Configuration": {"status": "PENDING"},
                         "Bronze": {"status": "PENDING"},
-                        "Silver": {"status": "PENDING"}
+                        "Silver": {"status": "PENDING"},
+                        "Gold": {"status": "PENDING"}
                     }
                 }
         return {**state, "datasets": ds, "progress": progress}
@@ -152,7 +153,8 @@ def _discover(state: Dict) -> Dict:
                         "Master Configuration": {"status": "PENDING"},
                         "DQ Configuration": {"status": "PENDING"},
                         "Bronze": {"status": "PENDING"},
-                        "Silver": {"status": "PENDING"}
+                        "Silver": {"status": "PENDING"},
+                        "Gold": {"status": "PENDING"}
                     }
                 }
         return {**state, "datasets": ds, "progress": progress}
@@ -439,7 +441,9 @@ def _transform(state: Dict) -> Dict:
             r = svc.run(dsid, suppress_email=True)
             duration = max(time.time() - start_t, 0.001)
             ds_name = state.get("progress", {}).get(dsid, {}).get("dataset_name") or i.get("file_name")
-            results.append({"dataset_id": dsid, "dataset_name": ds_name, "status": "SUCCESS", "metrics": r})
+            result_status = "FAILURE" if str(r.get("gold", {}).get("status", "")).upper() == "FAILED" else "SUCCESS"
+            result_reason = r.get("gold", {}).get("reason", "") if result_status == "FAILURE" else ""
+            results.append({"dataset_id": dsid, "dataset_name": ds_name, "status": result_status, "metrics": r, "reason": result_reason})
             prog = state.get("progress", {})
             if dsid in prog:
                 # DQ Details
@@ -498,7 +502,29 @@ def _transform(state: Dict) -> Dict:
                     "status": "PASSED", 
                     "detail": s_detail
                 }
-                logger.info(f"Transform SUCCESS for {ds_name} ({dsid}): Bronze={b_rows}, Silver={s_rows}, DQ_Violations={len(v_list)} in {duration:.2f}s")
+                
+                # Gold
+                g_rows = int(r.get("gold", {}).get("rows_written", 0))
+                g_status = str(r.get("gold", {}).get("status", "")).upper()
+                g_keys = r.get("paths", {}).get("gold", [])
+                g_paths_list = [f"az://{bucket}/{k}" for k in g_keys]
+                if g_status == "SKIPPED":
+                    prog[dsid]["steps"]["Gold"] = {
+                        "status": "SKIPPED",
+                        "detail": r.get("gold", {}).get("reason", "Gold layer skipped")
+                    }
+                elif g_status == "FAILED":
+                    prog[dsid]["steps"]["Gold"] = {
+                        "status": "FAILED",
+                        "detail": r.get("gold", {}).get("reason", "Gold layer failed")
+                    }
+                else:
+                    g_paths_str = ", ".join(g_paths_list) if g_paths_list else "N/A"
+                    prog[dsid]["steps"]["Gold"] = {
+                        "status": "PASSED",
+                        "detail": f"Path: {g_paths_str} | Metrics: {g_rows} rows published"
+                    }
+                logger.info(f"Transform SUCCESS for {ds_name} ({dsid}): Bronze={b_rows}, Silver={s_rows}, Gold={g_rows} ({g_status or 'PASSED'}), DQ_Violations={len(v_list)} in {duration:.2f}s")
         except Exception as e:
             logger.error(f"Transform failure for {dsid}: {e}")
             ds_name = state.get("progress", {}).get(dsid, {}).get("dataset_name") or i.get("file_name")
@@ -507,6 +533,7 @@ def _transform(state: Dict) -> Dict:
             if dsid in prog:
                 prog[dsid]["steps"]["Bronze"] = {"status": "FAILED", "detail": f"Processing Halted: {str(e)}"}
                 prog[dsid]["steps"]["Silver"] = {"status": "FAILED", "detail": "Skipped due to Bronze processing failure"}
+                prog[dsid]["steps"]["Gold"] = {"status": "SKIPPED", "detail": "Skipped due to upstream processing failure"}
     # Return progress as map for node state consistency; the API handles list conversion
     return {**state, "pipeline_results": results}
 
@@ -526,15 +553,16 @@ def _report(state: Dict) -> Dict:
     html.append(f"<div class='muted'>Total datasets: {total} • Success: {len(succ)} • Failure: {len(fail)}</div>")
     if succ:
         html.append("<h2>Successful Datasets</h2>")
-        html.append("<table><thead><tr><th>Dataset</th><th>Raw Rows</th><th>Bronze Rows</th><th>Silver Rows</th><th>Bronze Path</th><th>Silver Paths</th><th>Rejected Paths</th><th>DQ Violations</th><th>DQ Warnings</th></tr></thead><tbody>")
+        html.append("<table><thead><tr><th>Dataset</th><th>Raw Rows</th><th>Bronze Rows</th><th>Silver Rows</th><th>Gold Rows</th><th>Gold Status</th><th>Bronze Path</th><th>Silver Paths</th><th>Gold Paths</th><th>Rejected Paths</th><th>DQ Violations</th><th>DQ Warnings</th></tr></thead><tbody>")
         for r in succ:
             m = r.get("metrics", {})
             paths = m.get("paths", {})
             dq = m.get("dq_details", {"violations": [], "warnings": []})
             v_count = sum(int(d.get("count", 0)) for d in dq.get("violations", []))
             w_count = sum(int(d.get("count", 0)) for d in dq.get("warnings", []))
+            gold = m.get("gold", {})
             html.append(
-                f"<tr><td>{r.get('dataset_name') or r['dataset_id']}</td><td>{m.get('raw',{}).get('rows_read')}</td><td>{m.get('bronze',{}).get('rows_written')}</td><td>{m.get('silver',{}).get('rows_written')}</td><td>{paths.get('bronze') or ''}</td><td>{', '.join(paths.get('silver', []) or [])}</td><td>{', '.join(paths.get('rejected', []) or [])}</td><td>{v_count}</td><td>{w_count}</td></tr>"
+                f"<tr><td>{r.get('dataset_name') or r['dataset_id']}</td><td>{m.get('raw',{}).get('rows_read')}</td><td>{m.get('bronze',{}).get('rows_written')}</td><td>{m.get('silver',{}).get('rows_written')}</td><td>{gold.get('rows_written', 0)}</td><td>{gold.get('status', '')}</td><td>{paths.get('bronze') or ''}</td><td>{', '.join(paths.get('silver', []) or [])}</td><td>{', '.join(paths.get('gold', []) or [])}</td><td>{', '.join(paths.get('rejected', []) or [])}</td><td>{v_count}</td><td>{w_count}</td></tr>"
             )
             csv_rows.append({
                 "status": "SUCCESS",
@@ -543,8 +571,11 @@ def _report(state: Dict) -> Dict:
                 "raw_rows": m.get("raw",{}).get("rows_read"),
                 "bronze_rows": m.get("bronze",{}).get("rows_written"),
                 "silver_rows": m.get("silver",{}).get("rows_written"),
+                "gold_rows": gold.get("rows_written", 0),
+                "gold_status": gold.get("status", ""),
                 "bronze_path": paths.get("bronze") or "",
                 "silver_paths": ", ".join(paths.get("silver", []) or []),
+                "gold_paths": ", ".join(paths.get("gold", []) or []),
                 "rejected_paths": ", ".join(paths.get("rejected", []) or []),
                 "dq_violations": v_count,
                 "dq_warnings": w_count,
@@ -563,8 +594,11 @@ def _report(state: Dict) -> Dict:
                 "raw_rows": "",
                 "bronze_rows": "",
                 "silver_rows": "",
+                "gold_rows": "",
+                "gold_status": "",
                 "bronze_path": "",
                 "silver_paths": "",
+                "gold_paths": "",
                 "rejected_paths": "",
                 "dq_violations": "",
                 "dq_warnings": "",
@@ -578,7 +612,7 @@ def _report(state: Dict) -> Dict:
         bucket = settings.AZURE_CONTAINER_NAME or "datalake"
         key = f"Reports/{client}/{batch_id}/pipeline_report.csv"
         buf = StringIO()
-        fieldnames = ["status","dataset","dataset_id","raw_rows","bronze_rows","silver_rows","bronze_path","silver_paths","rejected_paths","dq_violations","dq_warnings","reason"]
+        fieldnames = ["status","dataset","dataset_id","raw_rows","bronze_rows","silver_rows","gold_rows","gold_status","bronze_path","silver_paths","gold_paths","rejected_paths","dq_violations","dq_warnings","reason"]
         writer = csv.DictWriter(buf, fieldnames=fieldnames)
         writer.writeheader()
         for row in csv_rows:

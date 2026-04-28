@@ -13,6 +13,7 @@ const PipelineNode = ({ data }) => {
   const isCompleted = data.status?.toUpperCase() === 'PASSED';
   const isRunning = data.status?.toUpperCase() === 'RUNNING';
   const isFailed = ['ERROR', 'FAILED'].includes(data.status?.toUpperCase());
+  const isSkipped = data.status?.toUpperCase() === 'SKIPPED';
   const isRow2 = data.index >= 4;
   
   const getIcon = (name) => {
@@ -40,7 +41,7 @@ const PipelineNode = ({ data }) => {
   const isSkeleton = data.isSkeleton;
   
   return (
-    <div className={`pipeline-node ${isRunning ? 'running' : ''} ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isSkeleton ? 'node-skeleton' : ''}`} onClick={() => !isSkeleton && data.triggerPreview(data.label, extractedPath)}>
+    <div className={`pipeline-node ${isRunning ? 'running' : ''} ${isCompleted ? 'completed' : ''} ${isFailed ? 'failed' : ''} ${isSkipped ? 'skipped' : ''} ${isSkeleton ? 'node-skeleton' : ''}`} onClick={() => !isSkeleton && data.triggerPreview(data.label, extractedPath)}>
       {/* For S-Curve Vertical Connections */}
       <Handle type="target" position={Position.Top} id="top-target" style={{ visibility: 'hidden', pointerEvents: 'none' }} />
       <Handle type="source" position={Position.Bottom} id="bottom-source" style={{ visibility: 'hidden', pointerEvents: 'none' }} />
@@ -179,7 +180,7 @@ export default function StepProgress({
 
   const fetchLayerData = async (layerName) => {
     setActiveLayer(layerName);
-    const nodeNameMap = { 'Raw': 'Raw Layer', 'Bronze': 'Bronze', 'Silver': 'Silver' };
+    const nodeNameMap = { 'Raw': 'Raw Layer', 'Bronze': 'Bronze', 'Silver': 'Silver', 'Gold': 'Gold' };
     const stepName = nodeNameMap[layerName];
     const info = activeResult?.steps?.[stepName];
     if (info?.status !== 'PASSED') {
@@ -232,7 +233,7 @@ export default function StepProgress({
     const steps = Object.values(ds?.steps || {});
     if (steps.length === 0) return { passed: 0, error: 0, warning: 0, total: 0 };
     return {
-      passed: steps.filter(s => s.status?.toUpperCase() === 'PASSED' || s.status?.toUpperCase() === 'SUCCESS').length,
+      passed: steps.filter(s => ['PASSED', 'SUCCESS', 'SKIPPED'].includes(s.status?.toUpperCase())).length,
       error: steps.filter(s => s.status?.toUpperCase() === 'ERROR' || s.status?.toUpperCase() === 'FAILED').length,
       warning: steps.filter(s => s.status?.toUpperCase() === 'WARNING' || s.status?.toUpperCase() === 'WARN').length,
       total: steps.length
@@ -242,7 +243,7 @@ export default function StepProgress({
   // --- Logic for Node Interaction ---
   const triggerPreview = useCallback((label, path) => {
     setSelectedNodeId(label);
-    if (path && ['Raw Layer', 'Master Configuration', 'Bronze', 'Silver'].includes(label)) {
+    if (path && ['Raw Layer', 'Master Configuration', 'Bronze', 'Silver', 'Gold'].includes(label)) {
       setShowPreviewModal(true);
       const simpleLabel = label === 'Raw Layer' ? 'Raw' : (label === 'Master Configuration' ? 'Master Configuration' : label);
       setActiveLayer(simpleLabel);
@@ -320,8 +321,8 @@ export default function StepProgress({
         
         // --- DOTTED ANIMATED FLOW LOGIC ---
         // A source is "flowing" if it passed/succeeded but the target hasn't passed yet
-        const sourcePassed = sourceInfo && ['PASSED', 'SUCCESS'].includes(sourceInfo.status?.toUpperCase());
-        const targetPassed = targetInfo && ['PASSED', 'SUCCESS'].includes(targetInfo.status?.toUpperCase());
+        const sourcePassed = sourceInfo && ['PASSED', 'SUCCESS', 'SKIPPED'].includes(sourceInfo.status?.toUpperCase());
+        const targetPassed = targetInfo && ['PASSED', 'SUCCESS', 'SKIPPED'].includes(targetInfo.status?.toUpperCase());
         const isFlowing = sourcePassed && !targetPassed;
         
         // Edge is animated if flowing
@@ -443,7 +444,7 @@ export default function StepProgress({
     summaryData.forEach(r => {
       if (r.status === 'SUCCESS' && r.metrics) {
         totalRowsRead += parseInt(r.metrics.raw?.rows_read || 0);
-        totalRowsWritten += parseInt(r.metrics.silver?.rows_written || 0);
+        totalRowsWritten += parseInt(r.metrics.gold?.rows_written || r.metrics.silver?.rows_written || 0);
         
         const dq = r.metrics.dq_details || {};
         totalDqViolations += (dq.violations || []).reduce((acc, v) => acc + parseInt(v.count || 0), 0);
@@ -545,6 +546,7 @@ export default function StepProgress({
                         <th>Status</th>
                         <th>Raw Rows</th>
                         <th>Silver Rows</th>
+                        <th>Gold Rows</th>
                         <th>DQ Status</th>
                         <th>Action</th>
                       </tr>
@@ -569,6 +571,7 @@ export default function StepProgress({
                             </td>
                             <td>{isSuccess ? m.raw?.rows_read?.toLocaleString() : '-'}</td>
                             <td>{isSuccess ? m.silver?.rows_written?.toLocaleString() : '-'}</td>
+                            <td>{isSuccess ? (m.gold?.status === 'SKIPPED' ? 'Skipped' : m.gold?.rows_written?.toLocaleString()) : '-'}</td>
                             <td>
                               {isSuccess ? (
                                 <span className={vCount > 0 ? 'text-amber-600' : 'text-green-600'} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

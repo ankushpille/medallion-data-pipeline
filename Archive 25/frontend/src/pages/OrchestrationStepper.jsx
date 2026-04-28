@@ -495,6 +495,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     if (s === 'passed' || s === 'success') return '#16a34a';
     if (s === 'failed' || s === 'error') return '#ef4444';
     if (s === 'warn' || s === 'warning') return '#f59e0b';
+    if (s === 'skipped') return '#64748b';
     return '#6b7280';
   }
 
