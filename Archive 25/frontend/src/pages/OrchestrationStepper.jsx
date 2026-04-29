@@ -27,6 +27,14 @@ const STEPS = [
   { num: 7, label: 'Execution' },
 ];
 
+function parseStrictJson(text) {
+  const safeText = String(text || '')
+    .replace(/\bNaN\b/g, 'null')
+    .replace(/\b-?Infinity\b/g, 'null')
+    .replace(/\bundefined\b/g, 'null');
+  return JSON.parse(safeText);
+}
+
 export default function OrchestrationStepper({ hideHeader = false }) {
   const toast = useToast();
   const nav = useNavigate();
@@ -34,7 +42,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [step, setStep] = useState(1);
   const [clients, setClients] = useState([]);
   const [selectedClient, setSelectedClient] = useState('');
-  const [sourceType, setSourceType] = useState('ADLS');
+  const [sourceType, setSourceType] = useState('');
   const [folderPath, setFolderPath] = useState('');
   const [apiSources, setApiSources] = useState([]);
   const [s3Sources, setS3Sources] = useState([]);
@@ -65,6 +73,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [datasetsLoading, setDatasetsLoading] = useState(false);
   const [intelligenceData, setIntelligenceData] = useState(null);
   const [configPersisted, setConfigPersisted] = useState(false);
+  const [clientSourceTypes, setClientSourceTypes] = useState([]);
+  const [selectedSources, setSelectedSources] = useState([]);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
@@ -102,6 +112,26 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     exit: { opacity: 0, scale: 0.95, transition: { duration: 0.2 } }
   };
 
+  function resetSessionState({ clearSourceSelection = false } = {}) {
+    setIntelligenceData(null);
+    setConfigPersisted(false);
+    setDatasets([]);
+    setOrchestrateResp(null);
+    setEditingConfigDataset(null);
+    setEditingConfigColumns([]);
+    setSelectedDqDataset(null);
+    setDqError(null);
+    setSelectedSources([]);
+    if (clearSourceSelection) {
+      setSelectedApiSource(null);
+      setSelectedEndpoint('');
+      setFolderPath('');
+      setApiSources([]);
+      setS3Sources([]);
+      setAdlsSources([]);
+    }
+  }
+
   // ----- API FUNCTIONS -----
   useEffect(() => { fetchClients(); }, []);
 
@@ -116,9 +146,35 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   }, [location?.state]);
 
   useEffect(() => {
-    if (selectedClient) fetchApiSourcesForClient(selectedClient);
-    else { setApiSources([]); setSelectedApiSource(null); setSelectedEndpoint(''); }
+    resetSessionState({ clearSourceSelection: true });
+    setClientSourceTypes([]);
+    if (sourceForm.source_type !== 'LOCAL') {
+      setSourceType('');
+    }
+    if (selectedClient) {
+      fetchApiSourcesForClient(selectedClient);
+      fetchClientSourceTypes(selectedClient);
+    } else { setApiSources([]); setSelectedApiSource(null); setSelectedEndpoint(''); }
   }, [selectedClient]);
+
+  async function fetchClientSourceTypes(client) {
+    try {
+      const res = await call(`/api-source/client-source-types?client_name=${encodeURIComponent(client)}`);
+      const sourceTypes = res.source_types || [];
+      setClientSourceTypes(sourceTypes);
+      const preferred = sourceTypes.find(t => t === 'LOCAL') || sourceTypes.find(t => t === 'REST_API') || sourceTypes[0];
+      if (preferred) {
+        setSourceType(preferred === 'AWS' ? 'S3' : preferred === 'AZURE' ? 'ADLS' : preferred === 'REST_API' ? 'API' : preferred);
+      }
+      console.debug('Client source type mapping', {
+        client_name: client,
+        source_types: sourceTypes,
+      });
+    } catch (e) {
+      setClientSourceTypes([]);
+      console.warn('Client source type mapping unavailable:', e?.message || e);
+    }
+  }
 
   async function fetchApiSourcesForClient(client) {
     setApiSourcesLoading(true);
@@ -131,9 +187,16 @@ export default function OrchestrationStepper({ hideHeader = false }) {
         source_types: list.map(s => s.source_type),
       });
 
-      const apis = list.filter(s => String(s.source_type || 'API').toUpperCase() === 'API');
-      const s3s = list.filter(s => String(s.source_type || '').toUpperCase() === 'S3');
-      const adl = list.filter(s => String(s.source_type || '').toUpperCase() === 'ADLS');
+      const sourceKind = (s) => {
+        const value = String(s.source_type || 'API').toUpperCase();
+        if (value === 'REST_API') return 'API';
+        if (value === 'AWS') return 'S3';
+        if (value === 'AZURE') return 'ADLS';
+        return value;
+      };
+      const apis = list.filter(s => sourceKind(s) === 'API');
+      const s3s = list.filter(s => sourceKind(s) === 'S3');
+      const adl = list.filter(s => sourceKind(s) === 'ADLS');
 
       setApiSources(apis);
       setS3Sources(s3s);
@@ -180,6 +243,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       const data = await resp.json();
       if (data.status && data.status.toUpperCase() === 'SUCCESS') {
         toast(`Uploaded ${data.uploaded || 0} files`, 'success');
+        resetSessionState({ clearSourceSelection: true });
         setSourceType('LOCAL');
         const uploadedIds = (data.results || []).map(r => r.dataset_id).filter(Boolean).join(',');
         const localSelection = uploadedIds || `upload/${selectedClient}`;
@@ -191,6 +255,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
         // Refresh master list and sources list to show the new landing zone
         fetchClients();
         fetchApiSourcesForClient(selectedClient);
+        fetchClientSourceTypes(selectedClient);
         setLocalRefreshTrigger(prev => prev + 1);
       } else {
         toast('Upload completed with warnings', 'warning');
@@ -217,11 +282,57 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   function handleDragLeave(e) { e.preventDefault(); setIsDragOver(false); }
   function removeFile(idx) { setUploadFiles(prev => (Array.isArray(prev) ? prev.filter((_, i) => i !== idx) : prev)); }
 
+  const EXECUTION_NODE_PRIORITY = {
+    discover: 0,
+    land: 0,
+    report_ingestion: 0,
+    configure: 1,
+    prepare_dq: 1,
+    report: 2,
+    transform: 3,
+  };
+
+  function datasetDisplayName(row = {}, pipelineResults = []) {
+    const matched = pipelineResults.find((item) => item.dataset_id && item.dataset_id === row.dataset_id);
+    return row.dataset_name || matched?.dataset_name || row.source_object || row.file_name || matched?.source_object || matched?.file_name || 'Dataset';
+  }
+
+  function mergeProgressByDataset(current = [], incoming = [], pipelineResults = []) {
+    const merged = new Map();
+    current.forEach((row) => {
+      const displayName = datasetDisplayName(row, pipelineResults);
+      merged.set(row.dataset_id, { ...row, dataset_name: displayName });
+    });
+    incoming.forEach((row) => {
+      const existing = merged.get(row.dataset_id) || {};
+      const displayName = datasetDisplayName({ ...existing, ...row }, pipelineResults);
+      merged.set(row.dataset_id, {
+        ...existing,
+        ...row,
+        dataset_name: displayName,
+        steps: {
+          ...(existing.steps || {}),
+          ...(row.steps || {}),
+        },
+      });
+    });
+    return Array.from(merged.values());
+  }
+
+  function preferExecutionPacket(current, incoming) {
+    if (!current) return incoming;
+    if (incoming?.completed) return incoming;
+    const currentPriority = EXECUTION_NODE_PRIORITY[current.node] ?? -1;
+    const incomingPriority = EXECUTION_NODE_PRIORITY[incoming?.node] ?? -1;
+    return incomingPriority >= currentPriority ? incoming : current;
+  }
+
   // Orchestration
   async function runOrchestration() {
     if (!selectedClient) return toast('Select a client first', 'error');
     const runningIntelligenceSuggestion = selectedApiSource === 'intelligence-scan';
-    if (runningIntelligenceSuggestion && (!intelligenceData || intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || intelligenceData.auth_mode === 'none' || intelligenceData.pipeline_capabilities?.scan_mode === 'mock')) {
+    const publicRestApiScan = intelligenceData?.framework === 'REST API';
+    if (runningIntelligenceSuggestion && (!intelligenceData || intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || (!publicRestApiScan && intelligenceData.auth_mode === 'none') || intelligenceData.pipeline_capabilities?.scan_mode === 'mock')) {
       console.debug('Execution validation failed', {
         hasIntelligence: !!intelligenceData,
         is_fallback: intelligenceData?.is_fallback,
@@ -242,6 +353,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       source_type: sourceType,
       folder_path: folderPath,
       selected_source: selectedApiSource,
+      sources: selectedSources,
     });
 
     setStep(7);
@@ -259,6 +371,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
+      let latestResponse = { progress: [], pipeline_results: [] };
+      let preferredNodeResponse = null;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -268,38 +382,43 @@ export default function OrchestrationStepper({ hideHeader = false }) {
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
-            const data = JSON.parse(line);
+            const data = parseStrictJson(line);
             if (data.progress && Array.isArray(data.progress) && data.progress.length > 0) {
-              // DEEP MERGE: never replace existing datasets, only update/add
-              setOrchestrateResp(prev => {
-                const prevProgress = prev?.progress || [];
-                const prevMap = new Map(prevProgress.map(r => [r.dataset_id, r]));
-                data.progress.forEach(r => {
-                  const existing = prevMap.get(r.dataset_id) || {};
-                  const mergedSteps = { ...(existing.steps || {}), ...(r.steps || {}) };
-                  prevMap.set(r.dataset_id, { ...existing, ...r, steps: mergedSteps });
-                });
-                return {
-                  ...prev,
-                  ...data,
-                  progress: Array.from(prevMap.values()),
-                };
-              });
-            } else if (data.status || data.completed || data.pipeline_results) {
-              // Final summary — preserve existing progress, just add metadata
-              setOrchestrateResp(prev => ({
-                ...prev,
+              const pipelineResults = data.pipeline_results || latestResponse.pipeline_results || [];
+              latestResponse = {
+                ...latestResponse,
                 ...data,
-                // Keep the progress array intact — do NOT overwrite it
-                progress: prev?.progress || [],
-              }));
+                pipeline_results: pipelineResults,
+                progress: mergeProgressByDataset(latestResponse.progress || [], data.progress, pipelineResults),
+              };
+              preferredNodeResponse = preferExecutionPacket(preferredNodeResponse, latestResponse);
+              setOrchestrateResp(latestResponse);
+            } else if (data.status || data.completed || data.pipeline_results) {
+              latestResponse = {
+                ...latestResponse,
+                ...data,
+                pipeline_results: data.pipeline_results || latestResponse.pipeline_results || [],
+                progress: latestResponse.progress || [],
+              };
+              preferredNodeResponse = preferExecutionPacket(preferredNodeResponse, latestResponse);
+              setOrchestrateResp(latestResponse);
             }
             if (data.completed) {
+              const finalResponse = {
+                ...latestResponse,
+                ...data,
+                progress: data.progress?.length
+                  ? mergeProgressByDataset(preferredNodeResponse?.progress || latestResponse.progress || [], data.progress, data.pipeline_results || [])
+                  : (preferredNodeResponse?.progress || latestResponse.progress || []),
+                pipeline_results: data.pipeline_results || latestResponse.pipeline_results || [],
+                refreshKey: Date.now(),
+              };
+              console.log("FINAL RESPONSE:", finalResponse);
+              console.log("STEPS:", finalResponse.progress);
+              setOrchestrateResp(finalResponse);
               if (data.status === 'SUCCESS') toast('Orchestration finished successfully', 'success');
               else toast(`Orchestration failed: ${data.error}`, 'error');
-              if (!datasets || datasets.length === 0) {
-                try { await fetchDatasets(); } catch { }
-              }
+              try { await fetchDatasets(); } catch { }
             }
           } catch (e) { console.error('Error parsing stream chunk', e); }
         }
@@ -414,7 +533,17 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setDatasetsLoading(true);
     try {
       const res = await call(`/orchestrate/master-config?client_name=${encodeURIComponent(selectedClient)}&source_type=${encodeURIComponent(sourceType || '')}&dataset_ids=${encodeURIComponent(targetIds || '')}`);
-      setDatasets(res.config || []);
+      const scoped = (res.config || []).map(row => ({
+        ...row,
+        dataset_name: row.dataset_name || row.display_name || row.source_object || row.file_name || row.dataset_id,
+      }));
+      console.debug('Fetched datasets for active source', {
+        client_name: selectedClient,
+        source_type: sourceType,
+        target_ids: targetIds,
+        rows: scoped.length,
+      });
+      setDatasets(scoped);
     } catch (e) { 
       toast('Failed to load datasets', 'error'); 
     } finally {
@@ -440,9 +569,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     if (!client_name) return toast('Client Name is required', 'error');
     if (!source_name) return toast('Source Name is required', 'error');
 
-    if (normalizedSourceType === 'API' && !base_url) {
-      return toast('Base URL is required for API registration', 'error');
-    }
     if (normalizedSourceType === 'S3' && !bucket_name) {
       return toast('Bucket Name is required for S3 registration', 'error');
     }
@@ -454,6 +580,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
 
     try {
       await call('/api-source/register', 'POST', { ...sourceForm, source_type: normalizedSourceType });
+      resetSessionState({ clearSourceSelection: true });
       toast(`${normalizedSourceType} source registered successfully`, 'success');
       setSelectedClient(client_name);
       setSourceForm({
@@ -464,6 +591,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       });
       await fetchClients();
       await fetchApiSourcesForClient(client_name);
+      await fetchClientSourceTypes(client_name);
       if (normalizedSourceType === 'S3') {
         setSourceType('S3');
         setFolderPath(`s3://${bucket_name}`);
@@ -730,7 +858,14 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   selectedClient={selectedClient}
                   setSelectedClient={setSelectedClient}
                   fetchClients={fetchClients}
-                  onNext={() => setStep(2)}
+                  onNext={() => {
+                    if (sourceForm.source_type === 'LOCAL' && sourceForm.client_name) {
+                      setSourceType('LOCAL');
+                      setClientSourceTypes(['LOCAL']);
+                      resetSessionState({ clearSourceSelection: true });
+                    }
+                    setStep(2);
+                  }}
                   call={call}
                   toast={toast}
                   sourceForm={sourceForm}
@@ -748,21 +883,32 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                 <PipelineIntelligence
                   clientName={selectedClient}
                   initialData={intelligenceData}
+                  clientSourceTypes={clientSourceTypes}
+                  currentSourceType={sourceType}
+                  apiSources={apiSources}
                   onScanComplete={(data) => {
                     setIntelligenceData(data);
                     setConfigPersisted(false);
+                    setDatasets([]);
+                    setOrchestrateResp(null);
+                    setSelectedApiSource('intelligence-scan');
                     const details = data?.ingestion_details || data?.reformatted_config || {};
                     if (details.source_type) setSourceType(details.source_type);
                     if (details.source_path) {
                       setFolderPath(details.source_path);
                       setSelectedEndpoint(details.source_path);
-                      setSelectedApiSource('intelligence-scan');
+                    } else {
+                      setFolderPath('');
+                      setSelectedEndpoint('');
                     }
                   }}
                   onConfirm={(data) => {
                     if (data) {
                       setIntelligenceData(data);
                       setConfigPersisted(false);
+                      setDatasets([]);
+                      setOrchestrateResp(null);
+                      setSelectedApiSource('intelligence-scan');
                     }
                     setStep(3);
                   }}
@@ -789,7 +935,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   intelligenceData={intelligenceData}
                   configPersisted={configPersisted}
                   setConfigPersisted={setConfigPersisted}
+                  clientSourceTypes={clientSourceTypes}
+                  setSelectedSources={setSelectedSources}
                   toast={toast}
+                  onManualSourceSelected={() => resetSessionState({ clearSourceSelection: false })}
                   onNext={() => { setStep(4); }}
                 />
               )}

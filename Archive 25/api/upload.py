@@ -93,7 +93,8 @@ async def upload_ingest(
             if not content:
                 errors.append({"file": f.filename, "error": "File is empty"}); continue
 
-            safe  = f.filename.replace(" ", "_")
+            original_name = f.filename
+            safe  = original_name.replace("\\", "_").replace("/", "_")
             rkey  = f"Raw/{client_name}/{batch_id}/{safe}"
             dsid  = _dsid(client_name, safe)
             fmt   = suffix.lstrip(".").upper()
@@ -138,7 +139,7 @@ async def upload_ingest(
                 "is_active": True, "created_at": datetime.utcnow().isoformat(),
             })
             results.append({
-                "file_name": safe, "dataset_id": dsid,
+                "file_name": safe, "display_name": original_name, "internal_id": dsid, "dataset_id": dsid,
                 "size_bytes": len(content), "columns": len(cols),
                 "raw_path": f"az://{container}/{rkey}",
             })
@@ -185,6 +186,8 @@ async def upload_list(
             "dataset_id": record.dataset_id,
             "client_name": record.client_name,
             "source_object": record.source_object,
+            "display_name": record.source_object,
+            "internal_id": record.dataset_id,
             "file_format": record.file_format,
             "raw_layer_path": record.raw_layer_path,
             "target_layer_bronze": record.target_layer_bronze,

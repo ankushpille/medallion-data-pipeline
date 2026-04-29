@@ -12,6 +12,16 @@ import json
 
 router = APIRouter(prefix="/api-source", tags=["API Source"])
 
+def _storage_source_type(value: Optional[str]) -> str:
+    raw = (value or "API").upper().strip()
+    if raw in {"REST", "REST_API"}:
+        return "API"
+    if raw == "AWS":
+        return "S3"
+    if raw == "AZURE":
+        return "ADLS"
+    return raw
+
 
 class RegisterRequest(BaseModel):
     client_name:    str
@@ -51,7 +61,7 @@ def test_connection(request: RegisterRequest):
     Attempts to connect to the source defined in request.
     Does NOT save anything to DB.
     """
-    source_type = (request.source_type or "API").upper().strip()
+    source_type = _storage_source_type(request.source_type)
     logger.info(f"Testing connection for {source_type} source: {request.source_name}")
 
     try:
@@ -140,7 +150,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     Register a data source for a client.
     Supported types: API, S3, ADLS.
     """
-    source_type = (request.source_type or "API").upper().strip()
+    source_type = _storage_source_type(request.source_type)
     existing = db.query(APISourceConfig).filter(
         APISourceConfig.client_name == request.client_name,
         APISourceConfig.source_name == request.source_name
@@ -205,6 +215,71 @@ def list_sources(client_name: Optional[str] = None, db: Session = Depends(get_db
         d["auth_token"] = ("*" * max(0, len(c.auth_token) - 4) + c.auth_token[-4:]) if c.auth_token else None
         results.append(d)
     return {"total": len(results), "configs": results}
+
+
+def _canonical_source_type(value: Optional[str]) -> Optional[str]:
+    raw = (value or "").strip().upper()
+    if raw in {"S3", "AWS"}:
+        return "AWS"
+    if raw in {"ADLS", "AZURE"}:
+        return "AZURE"
+    if raw in {"API", "REST", "REST_API"}:
+        return "REST_API"
+    if raw in {"FABRIC", "MICROSOFT_FABRIC"}:
+        return "FABRIC"
+    if raw == "LOCAL":
+        return "LOCAL"
+    return raw or None
+
+
+@router.get("/client-source-types", summary="List source types configured for a client")
+def client_source_types(client_name: str, db: Session = Depends(get_db)):
+    """
+    Returns canonical source types associated with the selected client.
+    Used by the old DEA UI to avoid showing unrelated Intelligence providers.
+    """
+    if not client_name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+
+    types = set()
+
+    configs = db.query(APISourceConfig).filter(
+        APISourceConfig.client_name == client_name,
+        APISourceConfig.is_active == True,
+    ).all()
+    for cfg in configs:
+        mapped = _canonical_source_type(cfg.source_type)
+        if mapped:
+            types.add(mapped)
+
+    try:
+        from models.master_config_authoritative import MasterConfigAuthoritative
+        rows = db.query(MasterConfigAuthoritative.source_type).filter(
+            MasterConfigAuthoritative.client_name == client_name,
+            MasterConfigAuthoritative.is_active == True,
+        ).distinct().all()
+        for row in rows:
+            mapped = _canonical_source_type(row[0])
+            if mapped:
+                types.add(mapped)
+    except Exception as exc:
+        logger.warning(f"Could not inspect authoritative master config source types for client={client_name}: {exc}")
+
+    try:
+        from models.master_config import MasterConfig
+        rows = db.query(MasterConfig.source_system).filter(
+            MasterConfig.client_name == client_name,
+            MasterConfig.is_active == True,
+        ).distinct().all()
+        for row in rows:
+            mapped = _canonical_source_type(row[0])
+            if mapped:
+                types.add(mapped)
+    except Exception as exc:
+        logger.warning(f"Could not inspect intelligence master config source types for client={client_name}: {exc}")
+
+    logger.info(f"Client source types: client={client_name}, source_types={sorted(types)}")
+    return {"client_name": client_name, "source_types": sorted(types)}
 
 
 @router.get("/endpoints/{client_name}", summary="List available API endpoints for a client")

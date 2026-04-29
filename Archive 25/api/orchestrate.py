@@ -3,6 +3,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
+import math
+import numbers
 from sqlalchemy.orm import Session
 from core.database import get_db
 from orchestration.flow import build_graph
@@ -13,6 +15,62 @@ from loguru import logger
 from datetime import datetime
 
 router = APIRouter(prefix="/orchestrate", tags=["LangGraph Orchestration"])
+
+
+def clean_json(obj):
+    if obj is None or isinstance(obj, (str, bool)):
+        return obj
+    if isinstance(obj, numbers.Real):
+        value = float(obj)
+        if not math.isfinite(value):
+            return None
+        return obj.item() if hasattr(obj, "item") else obj
+    if isinstance(obj, dict):
+        return {k: clean_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [clean_json(v) for v in obj]
+    if obj.__class__.__name__ in {"NAType", "NaTType"}:
+        return None
+    return obj
+
+
+def _json_line(payload: dict) -> str:
+    return json.dumps(clean_json(payload), allow_nan=False) + "\n"
+
+
+def _canonical_source_type(value: Optional[str]) -> Optional[str]:
+    raw = (value or "").strip().upper()
+    if raw in {"S3", "AWS"}:
+        return "AWS"
+    if raw in {"ADLS", "AZURE"}:
+        return "AZURE"
+    if raw in {"API", "REST", "REST_API"}:
+        return "REST_API"
+    if raw in {"FABRIC", "MICROSOFT_FABRIC"}:
+        return "FABRIC"
+    if raw == "LOCAL":
+        return "LOCAL"
+    return raw or None
+
+
+def _configured_source_types(client_name: str, db: Session) -> set[str]:
+    from models.api_source_config import APISourceConfig
+    from models.master_config import MasterConfig
+
+    types = set()
+    for cfg in db.query(APISourceConfig).filter(APISourceConfig.client_name == client_name, APISourceConfig.is_active == True).all():
+        mapped = _canonical_source_type(cfg.source_type)
+        if mapped:
+            types.add(mapped)
+    for row in db.query(MasterConfigAuthoritative.source_type).filter(MasterConfigAuthoritative.client_name == client_name, MasterConfigAuthoritative.is_active == True).distinct().all():
+        mapped = _canonical_source_type(row[0])
+        if mapped:
+            types.add(mapped)
+    for row in db.query(MasterConfig.source_system).filter(MasterConfig.client_name == client_name, MasterConfig.is_active == True).distinct().all():
+        mapped = _canonical_source_type(row[0])
+        if mapped:
+            types.add(mapped)
+    return types
 
 
 try:
@@ -94,13 +152,29 @@ def run(
         raise HTTPException(status_code=400, detail="client_name is required")
 
     src = source_type.upper().strip()
-    if require_real_scan:
+    if src == "REST_API":
+        src = "API"
+    elif src == "AWS":
+        src = "S3"
+    elif src == "AZURE":
+        src = "ADLS"
+    configured_types = _configured_source_types(client_name, db)
+    requested_type = _canonical_source_type(src)
+    if configured_types and requested_type not in configured_types:
+        logger.warning(f"Execution rejected for client={client_name}: requested={requested_type}, configured={sorted(configured_types)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Source type {requested_type} is not configured for client '{client_name}'. Configured source types: {sorted(configured_types)}"
+        )
+
+    scan_required = require_real_scan or src in ("S3", "ADLS", "FABRIC") or (src == "API" and bool(folder_path))
+    if scan_required:
         from models.master_config import MasterConfig
         configs = db.query(MasterConfig).filter(
             MasterConfig.client_name == client_name,
             MasterConfig.is_active == True,
         ).all()
-        logger.info(f"Execution validation: client={client_name}, require_real_scan={require_real_scan}, config_rows={len(configs)}")
+        logger.info(f"Execution validation: client={client_name}, require_real_scan={scan_required}, config_rows={len(configs)}")
         if not configs:
             raise HTTPException(status_code=400, detail="Configuration must be saved before execution.")
         has_real_scan = False
@@ -109,7 +183,7 @@ def run(
             caps = rules.get("pipeline_capabilities") or {}
             if (
                 rules.get("scan_status") in ("success", "partial")
-                and rules.get("auth_mode") not in (None, "", "none")
+                and (rules.get("framework") == "REST API" or caps.get("api") or rules.get("auth_mode") not in (None, "", "none"))
                 and not rules.get("is_fallback")
                 and caps.get("scan_mode") != "mock"
             ):
@@ -156,7 +230,7 @@ def run(
             if isinstance(progress_data, dict):
                 progress_data = list(progress_data.values())
                 
-            return {
+            return clean_json({
                 "status":           "SUCCESS",
                 "source_type":      src,
                 "client_name":      client_name,
@@ -166,7 +240,7 @@ def run(
                 "pipeline_results": res.get("pipeline_results", []),
                 "progress":         progress_data,
                 "master_config":    res.get("master_config", [])
-            }
+            })
             
         def event_stream():
             accumulated_results = []
@@ -191,9 +265,9 @@ def run(
                             payload["master_config"] = node_state["master_config"]
                         if "pipeline_results" in node_state:
                             payload["pipeline_results"] = node_state["pipeline_results"]
-                            accumulated_results = node_state["pipeline_results"]
+                            accumulated_results = clean_json(node_state["pipeline_results"])
                             
-                        yield json.dumps(payload) + "\n"
+                        yield _json_line(payload)
                 
                 # Final state after END - use accumulated results
                 total = len(accumulated_results)
@@ -210,12 +284,12 @@ def run(
                         hist.total_datasets = total
                         hist.success_count = succ
                         hist.failure_count = fail
-                        hist.pipeline_results = accumulated_results
+                        hist.pipeline_results = clean_json(accumulated_results)
                         db_final.commit()
                 except Exception as e:
                     logger.error(f"Failed to update run history: {e}")
 
-                yield json.dumps({"status": "SUCCESS", "completed": True, "pipeline_results": accumulated_results, "progress": last_progress}) + "\n"
+                yield _json_line({"status": "SUCCESS", "completed": True, "pipeline_results": accumulated_results, "progress": last_progress})
             except Exception as e:
                 logger.error(f"Stream error: {e}")
                 # Update DB with failure
@@ -228,7 +302,7 @@ def run(
                         hist.end_time = datetime.utcnow()
                         db_fail.commit()
                 except: pass
-                yield json.dumps({"status": "FAILURE", "error": str(e), "completed": True}) + "\n"
+                yield _json_line({"status": "FAILURE", "error": str(e), "completed": True})
                 
         return StreamingResponse(event_stream(), media_type="application/x-ndjson")
     except Exception as e:
@@ -375,6 +449,22 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
         # Skip filtering if we already scoped via ad-hoc discovery (path was the scope)
         is_storage_path = dataset_ids and (dataset_ids.startswith("az://") or dataset_ids.startswith("s3://"))
         
+        # Filter storage paths to the active source/path so previous scan/manual rows do not leak in.
+        if dataset_ids and is_storage_path and not df.empty:
+            actual_src = "S3" if dataset_ids.startswith("s3://") else "ADLS"
+            target_path = dataset_ids.rstrip("/").lower()
+            mask = df["source_type"].astype(str).str.upper().eq(actual_src)
+            if "source_folder" in df.columns:
+                mask &= df["source_folder"].astype(str).str.rstrip("/").str.lower().apply(
+                    lambda v: v == target_path or v.startswith(target_path + "/") or target_path.startswith(v + "/")
+                )
+            if "raw_layer_path" in df.columns:
+                mask |= (
+                    df["source_type"].astype(str).str.upper().eq(actual_src)
+                    & df["raw_layer_path"].astype(str).str.lower().str.startswith(target_path)
+                )
+            df = df[mask]
+
         # Filter by dataset_ids if provided and it's NOT an already-scoped storage path
         if dataset_ids and not is_storage_path:
             target_ids = [tid.strip().lower() for tid in dataset_ids.split(",") if tid.strip()]
@@ -407,11 +497,13 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
                     mask |= df["source_folder"].astype(str).apply(lambda x: any(is_path_match(x, t) for t in target_ids))
 
                 df = df[mask]
+        elif source_type and not df.empty:
+            df = df[df["source_type"].astype(str).str.upper() == source_type.upper()]
 
         
         if df.empty:
              if stream:
-                 def empty_gen(): yield json.dumps({"client_name": client_name, "message": "No config found"}) + "\n"
+                 def empty_gen(): yield _json_line({"client_name": client_name, "message": "No config found"})
                  return StreamingResponse(empty_gen(), media_type="application/x-ndjson")
              return {"client_name": client_name, "config": [], "message": "No master configuration found for this client."}
 
@@ -422,15 +514,15 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
         if stream:
             def record_stream():
                 for r in records:
-                    yield json.dumps(r) + "\n"
-                yield json.dumps({"status": "SUCCESS", "completed": True}) + "\n"
+                    yield _json_line(r)
+                yield _json_line({"status": "SUCCESS", "completed": True})
             return StreamingResponse(record_stream(), media_type="application/x-ndjson")
 
-        return {
+        return clean_json({
             "client_name": client_name, 
             "location": f"az://{mgr.bucket_name}/{key}",
             "config": records
-        }
+        })
     except Exception as e:
         logger.error(f"Failed to fetch master config for {client_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -521,13 +613,13 @@ def preview_data(s3_url: str):
         # Replace NaN/NaT for JSON compliance
         df = df.replace({np.nan: None})
         
-        return {
+        return clean_json({
             "path": s3_url,
             "resolved_file": final_key,
             "columns": list(df.columns),
             "rows": df.head(10).to_dict(orient="records"),
             "total_sample_rows": len(df)
-        }
+        })
     except Exception as e:
         logger.error(f"Preview failed for {s3_url}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

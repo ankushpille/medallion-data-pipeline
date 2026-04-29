@@ -21,6 +21,8 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
   const filteredClients = (clients || []).filter(c =>
     c.toLowerCase().includes(searchQuery.toLowerCase())
   );
+  const apiHasScanDetails = sourceForm.source_type === 'API' && !!sourceForm.base_url && !!String(sourceForm.endpoints || '').trim();
+  const apiCanSkipConnection = sourceForm.source_type === 'API' && !apiHasScanDetails;
 
   const handleSelectClient = (c) => {
     setSelectedClient(c);
@@ -494,21 +496,21 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
               )}
               
               <button
-                className={`orch-btn primary premium-btn ${(connectionVerified || sourceForm.source_type === 'LOCAL') ? '' : 'disabled-btn'}`}
+                className={`orch-btn primary premium-btn ${(connectionVerified || sourceForm.source_type === 'LOCAL' || apiCanSkipConnection) ? '' : 'disabled-btn'}`}
                 onClick={() => {
                   if (sourceForm.source_type === 'LOCAL') {
                     setSelectedClient(sourceForm.client_name);
                     toast('Client set. Please upload files in the next step.', 'success');
                     onNext();
                   } else {
-                    if (!connectionVerified) {
+                    if (!connectionVerified && !apiCanSkipConnection) {
                       toast('Please test and verify connection before registration', 'warning');
                       return;
                     }
                     registerSource();
                   }
                 }}
-                disabled={savingSource || !sourceForm.client_name || (sourceForm.source_type !== 'LOCAL' && (!sourceForm.source_name || !connectionVerified))}
+                disabled={savingSource || !sourceForm.client_name || (sourceForm.source_type !== 'LOCAL' && (!sourceForm.source_name || (!connectionVerified && !apiCanSkipConnection)))}
                 style={{ flex: sourceForm.source_type !== 'LOCAL' ? 1.5 : 1 }}
               >
                 {savingSource ? 'Registering...' : 

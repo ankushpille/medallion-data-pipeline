@@ -8,7 +8,7 @@ import {
   FiBox,
   FiCloud,
 } from "react-icons/fi";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion } from "framer-motion";
 import FluentSelect from "../FluentSelect";
 import logo from "../../assets/images/image.png";
@@ -35,21 +35,91 @@ export default function StepSources({
   intelligenceData,
   configPersisted,
   setConfigPersisted,
+  setSelectedSources,
   toast,
+  onManualSourceSelected,
 }) {
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
   const [selectedLocalFiles, setSelectedLocalFiles] = useState([]);
+  const [selectedS3Path, setSelectedS3Path] = useState("");
+  const [selectedADLSPath, setSelectedADLSPath] = useState("");
+  const [apiEndpoints, setApiEndpoints] = useState([]);
+  const [apiEndpointDraft, setApiEndpointDraft] = useState("");
   const [savingGeneratedConfig, setSavingGeneratedConfig] = useState(false);
   const [saveGeneratedError, setSaveGeneratedError] = useState("");
 
   useEffect(() => {
     if (selectedClient) {
       setSelectedLocalFiles([]); // Clear selections when switching clients
+      setSelectedS3Path("");
+      setSelectedADLSPath("");
+      setApiEndpoints([]);
+      setApiEndpointDraft("");
       setLocalFiles([]); // Reset list to show loading state if needed
       fetchLocalFiles(selectedClient);
     }
   }, [selectedClient, refreshTrigger]);
+
+  const selectedSources = useMemo(() => [
+    ...selectedLocalFiles.map((datasetId) => {
+      const file = localFiles.find((item) => item.dataset_id === datasetId) || {};
+      return {
+        type: "LOCAL",
+        file: file.display_name || file.source_object || file.file_name || datasetId,
+        dataset_id: datasetId,
+      };
+    }),
+    ...apiEndpoints.map((endpoint) => ({ type: "API", endpoint })),
+    ...(selectedS3Path ? [{ type: "S3", path: selectedS3Path }] : []),
+    ...(selectedADLSPath ? [{ type: "ADLS", path: selectedADLSPath }] : []),
+  ], [selectedLocalFiles, localFiles, apiEndpoints, selectedS3Path, selectedADLSPath]);
+  const canContinue = selectedSources.length > 0;
+
+  useEffect(() => {
+    setSelectedSources?.(selectedSources);
+    const primary = selectedSources[0];
+    if (!primary) {
+      setSourceType("");
+      setFolderPath("");
+      setSelectedEndpoint("");
+      setSelectedApiSource(null);
+      return;
+    }
+    if (primary.type === "LOCAL") {
+      setSourceType("LOCAL");
+      const ids = selectedSources.filter((item) => item.type === "LOCAL").map((item) => item.dataset_id).join(",");
+      setFolderPath(ids);
+      setSelectedEndpoint(ids);
+      setSelectedApiSource("local-multi");
+    } else if (primary.type === "API") {
+      setSourceType("API");
+      const endpoints = selectedSources.filter((item) => item.type === "API").map((item) => item.endpoint).join(",");
+      setFolderPath(endpoints);
+      setSelectedEndpoint(endpoints);
+      setSelectedApiSource("api-multi");
+    } else if (primary.type === "S3") {
+      setSourceType("S3");
+      setFolderPath(primary.path);
+      setSelectedEndpoint(primary.path);
+      setSelectedApiSource("s3-path");
+    } else if (primary.type === "ADLS") {
+      setSourceType("ADLS");
+      setFolderPath(primary.path);
+      setSelectedEndpoint(primary.path);
+      setSelectedApiSource("adls-path");
+    }
+  }, [selectedSources, setSelectedSources, setSourceType, setFolderPath, setSelectedEndpoint, setSelectedApiSource]);
+
+  useEffect(() => {
+    if (String(sourceType || "").toUpperCase() === "LOCAL" && selectedEndpoint) {
+      const ids = String(selectedEndpoint).split(",").map((item) => item.trim()).filter(Boolean);
+      if (ids.length > 0) {
+        setSelectedLocalFiles(ids);
+        setActiveTab("LOCAL");
+      }
+    }
+  }, [sourceType, selectedEndpoint, refreshTrigger]);
 
   async function fetchLocalFiles(client) {
     setLocalFilesLoading(true);
@@ -64,6 +134,7 @@ export default function StepSources({
   }
 
   const toggleLocalFile = (file) => {
+    onManualSourceSelected?.();
     let newSelected;
     if (selectedLocalFiles.includes(file.dataset_id)) {
       newSelected = selectedLocalFiles.filter((id) => id !== file.dataset_id);
@@ -72,76 +143,27 @@ export default function StepSources({
     }
     setSelectedLocalFiles(newSelected);
 
-    if (newSelected.length > 0) {
-      setSelectedApiSource(`local-multi`);
-      const idList = newSelected.join(",");
-      setSelectedEndpoint(idList);
-      setSourceType("LOCAL");
-      setFolderPath(idList); // Pass IDs in folder_path for LOCAL
-    } else {
-      setSelectedApiSource(null);
-      setSelectedEndpoint("");
-      setSourceType("LOCAL");
-      setFolderPath("");
-    }
   };
 
   const [activeTab, setActiveTab] = useState("LOCAL");
-
-  useEffect(() => {
-    if (!intelligenceData && ["LOCAL", "API", "S3", "ADLS"].includes(String(sourceType || "").toUpperCase())) {
-      setActiveTab(String(sourceType).toUpperCase());
-    }
-  }, [sourceType, intelligenceData]);
-
-  useEffect(() => {
-    if (intelligenceData?.ingestion_support) {
-      const details =
-        intelligenceData.ingestion_details ||
-        intelligenceData.reformatted_config ||
-        {};
-      const detectedSourceType =
-        details.source_type || intelligenceData.reformatted_config?.source_type;
-      const detectedSourcePath =
-        details.source_path || intelligenceData.reformatted_config?.source_path;
-      if (detectedSourceType) setSourceType(detectedSourceType);
-      if (detectedSourcePath) {
-        setFolderPath(detectedSourcePath);
-        setSelectedEndpoint(detectedSourcePath);
-        setSelectedApiSource("intelligence-scan");
-      }
-
-      if (detectedSourceType === "S3") {
-        setActiveTab("S3");
-      } else if (detectedSourceType === "ADLS") {
-        setActiveTab("ADLS");
-      } else if (detectedSourceType === "LOCAL") {
-        setActiveTab("LOCAL");
-      } else if (detectedSourceType === "API") {
-        setActiveTab("API");
-      } else if (intelligenceData.ingestion_support.api) {
-        setActiveTab("API");
-      }
-    }
-  }, [
-    intelligenceData,
-    setFolderPath,
-    setSelectedApiSource,
-    setSelectedEndpoint,
-    setSourceType,
-  ]);
 
   const isTabSupported = () => {
     // Pipeline Intelligence is advisory only. Keep every published/manual tab available.
     return true;
   };
 
-  const sourceTabs = [
+  const sourceTabs = useMemo(() => [
     { id: "LOCAL", label: "Local Files", icon: <FiFolder />, color: "#10b981" },
     { id: "API", label: "REST API", icon: <FiLink />, color: "#3b82f6" },
-    { id: "S3", label: "AWS S3", icon: <FiBox />, color: "#f59e0b" },
-    { id: "ADLS", label: "Azure ADLS", icon: <FiCloud />, color: "#0078d4" },
-  ];
+    ...(s3Sources.length > 0 ? [{ id: "S3", label: "AWS S3", icon: <FiBox />, color: "#f59e0b" }] : []),
+    ...(adlsSources.length > 0 ? [{ id: "ADLS", label: "Azure ADLS", icon: <FiCloud />, color: "#0078d4" }] : []),
+  ], [s3Sources.length, adlsSources.length]);
+
+  useEffect(() => {
+    if (sourceTabs.length > 0 && !sourceTabs.some((tab) => tab.id === activeTab)) {
+      setActiveTab(sourceTabs[0].id);
+    }
+  }, [sourceTabs, activeTab]);
 
   const scanDetails =
     intelligenceData?.ingestion_details ||
@@ -169,7 +191,7 @@ export default function StepSources({
     !!intelligenceData &&
     !intelligenceData.is_fallback &&
     intelligenceData.scan_status !== "failed" &&
-    intelligenceData.auth_mode !== "none" &&
+    (intelligenceData.framework === "REST API" || intelligenceData.auth_mode !== "none") &&
     intelligenceData.pipeline_capabilities?.scan_mode !== "mock";
 
   const getFabricSuggestion = () => {
@@ -293,10 +315,17 @@ export default function StepSources({
       if (suggestion.tab) setActiveTab(suggestion.tab);
       return;
     }
-    setSourceType(suggestion.type);
-    setFolderPath(suggestion.path || "");
-    setSelectedEndpoint(suggestion.path || "");
-    setSelectedApiSource(registered?.id || "intelligence-scan");
+    onManualSourceSelected?.();
+    if (suggestion.type === "S3") {
+      setSelectedS3Path(suggestion.path || "");
+    } else if (suggestion.type === "ADLS") {
+      setSelectedADLSPath(suggestion.path || "");
+    } else if (suggestion.type === "API" && suggestion.path) {
+      setApiEndpoints((prev) => [...new Set([...prev, suggestion.path])]);
+    } else if (suggestion.type === "LOCAL" && suggestion.path) {
+      setSelectedLocalFiles((prev) => [...new Set([...prev, suggestion.path])]);
+    }
+    setSelectedApiSource(registered?.id || `${suggestion.type.toLowerCase()}-suggestion`);
     if (suggestion.tab) setActiveTab(suggestion.tab);
   };
 
@@ -735,6 +764,50 @@ export default function StepSources({
           {/* API Sources Tab */}
           {activeTab === "API" && (
             <div className="source-section animate-in">
+              <div className="source-card" style={{ marginBottom: 12 }}>
+                <div className="source-info" style={{ flex: 1 }}>
+                  <div className="source-name">Add REST API Endpoint</div>
+                  <input
+                    className="orch-input"
+                    value={apiEndpointDraft}
+                    onChange={(e) => setApiEndpointDraft(e.target.value)}
+                    placeholder="/users or users"
+                    style={{ marginTop: 8 }}
+                  />
+                </div>
+                <div className="source-actions">
+                  <button
+                    className="orch-btn tiny"
+                    disabled={!apiEndpointDraft.trim()}
+                    onClick={() => {
+                      const endpoint = apiEndpointDraft.trim();
+                      if (!endpoint) return;
+                      onManualSourceSelected?.();
+                      setApiEndpoints((prev) => [...new Set([...prev, endpoint])]);
+                      setApiEndpointDraft("");
+                    }}
+                  >
+                    Add Endpoint
+                  </button>
+                </div>
+              </div>
+              {apiEndpoints.length > 0 && (
+                <div className="pi-tag-list" style={{ marginBottom: 12 }}>
+                  {apiEndpoints.map((endpoint) => (
+                    <span key={endpoint} className="pi-tag active">
+                      {endpoint}
+                      <button
+                        type="button"
+                        className="orch-btn ghost tiny"
+                        style={{ marginLeft: 8, padding: "0 6px" }}
+                        onClick={() => setApiEndpoints((prev) => prev.filter((item) => item !== endpoint))}
+                      >
+                        Remove
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="source-list">
                 {apiSourcesLoading ? (
                   [1, 2].map((i) => (
@@ -748,21 +821,9 @@ export default function StepSources({
                   apiSources.map((s) => (
                     <div
                       key={s.id}
-                      className={`source-card ${selectedApiSource === s.id ? "selected" : ""}`}
+                      className={`source-card ${(s.endpoints || []).some((ep) => apiEndpoints.includes(ep)) ? "selected" : ""}`}
                       onClick={() => {
                         setSelectedApiSource(s.id);
-                        setSourceType("API");
-                        if (
-                          s.endpoints &&
-                          s.endpoints.length > 0 &&
-                          !selectedEndpoint
-                        ) {
-                          setSelectedEndpoint(s.endpoints[0]);
-                          setFolderPath(s.endpoints[0]);
-                        } else if (!selectedEndpoint && s.base_url) {
-                          setSelectedEndpoint(s.base_url);
-                          setFolderPath(s.base_url);
-                        }
                       }}
                     >
                       <div className="source-info" style={{ flex: 1 }}>
@@ -777,20 +838,14 @@ export default function StepSources({
                         <FluentSelect
                           multi
                           style={{ minWidth: 220 }}
-                          value={
-                            selectedApiSource === s.id
-                              ? selectedEndpoint
-                                ? selectedEndpoint.split(",")
-                                : []
-                              : []
-                          }
+                          value={(s.endpoints || []).filter((ep) => apiEndpoints.includes(ep))}
                           placeholder="Select endpoints..."
                           onChange={(e) => {
                             const vals = e.target.value;
+                            onManualSourceSelected?.();
+                            const otherEndpoints = apiEndpoints.filter((ep) => !(s.endpoints || []).includes(ep));
+                            setApiEndpoints([...new Set([...otherEndpoints, ...vals])]);
                             setSelectedApiSource(s.id);
-                            setSelectedEndpoint(vals.join(","));
-                            setSourceType("API");
-                            setFolderPath(vals.join(","));
                           }}
                           options={(s.endpoints || []).map((ep) => ({
                             value: ep,
@@ -856,7 +911,7 @@ export default function StepSources({
                     </div>
                   ) : (
                     localFiles.map((file) => (
-                      <div
+                        <div
                         key={file.dataset_id}
                         className={`local-file-card ${selectedLocalFiles.includes(file.dataset_id) ? "selected" : ""}`}
                         onClick={() => toggleLocalFile(file)}
@@ -865,7 +920,7 @@ export default function StepSources({
                           <FiFile size={16} />
                         </div>
                         <div className="file-info">
-                          <div className="file-name">{file.source_object}</div>
+                          <div className="file-name">{file.display_name || file.source_object}</div>
                           <div className="file-meta">
                             <span>{file.file_format}</span> •{" "}
                             <span>
@@ -895,13 +950,9 @@ export default function StepSources({
                   s3Sources.map((s) => (
                     <div
                       key={s.id}
-                      className={`source-card ${selectedApiSource === s.id ? "selected" : ""}`}
+                      className={`source-card ${selectedS3Path.startsWith(`s3://${s.bucket_name}`) ? "selected" : ""}`}
                       onClick={() => {
                         setSelectedApiSource(s.id);
-                        setSourceType("S3");
-                        const basePath = `s3://${s.bucket_name}`;
-                        setSelectedEndpoint(basePath);
-                        setFolderPath(basePath);
                       }}
                     >
                       <div className="source-info" style={{ flex: 1 }}>
@@ -909,7 +960,7 @@ export default function StepSources({
                           {s.source_name} (AWS S3)
                         </div>
                         <div className="source-url">{s.bucket_name}</div>
-                        {selectedApiSource === s.id && selectedEndpoint && (
+                        {selectedS3Path.startsWith(`s3://${s.bucket_name}`) && (
                           <div
                             className="selected-path-msg"
                             style={{
@@ -929,15 +980,14 @@ export default function StepSources({
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelectedApiSource(s.id);
-                            setSourceType("S3");
                             const basePath = `s3://${s.bucket_name}`;
                             openExplorer(basePath, "pick", (path) => {
-                              setSelectedEndpoint(path);
-                              setFolderPath(path);
+                              onManualSourceSelected?.();
+                              setSelectedS3Path(path);
                             });
                           }}
                         >
-                          {selectedEndpoint && selectedApiSource === s.id
+                          {selectedS3Path.startsWith(`s3://${s.bucket_name}`)
                             ? "Change Folder"
                             : "Browse Storage"}
                         </button>
@@ -979,13 +1029,9 @@ export default function StepSources({
                   adlsSources.map((s) => (
                     <div
                       key={s.id}
-                      className={`source-card ${selectedApiSource === s.id ? "selected" : ""}`}
+                      className={`source-card ${selectedADLSPath.startsWith(`az://${s.azure_account}/${s.azure_container}`) ? "selected" : ""}`}
                       onClick={() => {
                         setSelectedApiSource(s.id);
-                        setSourceType("ADLS");
-                        const basePath = `az://${s.azure_account}/${s.azure_container}`;
-                        setSelectedEndpoint(basePath);
-                        setFolderPath(basePath);
                       }}
                     >
                       <div className="source-info" style={{ flex: 1 }}>
@@ -995,7 +1041,7 @@ export default function StepSources({
                         <div className="source-url">
                           {s.azure_account}/{s.azure_container}
                         </div>
-                        {selectedApiSource === s.id && selectedEndpoint && (
+                        {selectedADLSPath.startsWith(`az://${s.azure_account}/${s.azure_container}`) && (
                           <div
                             className="selected-path-msg"
                             style={{
@@ -1015,15 +1061,14 @@ export default function StepSources({
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelectedApiSource(s.id);
-                            setSourceType("ADLS");
                             const basePath = `az://${s.azure_account}/${s.azure_container}`;
                             openExplorer(basePath, "pick", (path) => {
-                              setSelectedEndpoint(path);
-                              setFolderPath(path);
+                              onManualSourceSelected?.();
+                              setSelectedADLSPath(path);
                             });
                           }}
                         >
-                          {selectedEndpoint && selectedApiSource === s.id
+                          {selectedADLSPath.startsWith(`az://${s.azure_account}/${s.azure_container}`)
                             ? "Change Folder"
                             : "Browse Storage"}
                         </button>
@@ -1072,7 +1117,7 @@ export default function StepSources({
           )}
           <button
             className="orch-btn primary step-next-btn"
-            disabled={!selectedEndpoint || savingGeneratedConfig}
+            disabled={!canContinue || savingGeneratedConfig}
             onClick={
               intelligenceData ? saveIntelligenceConfigAndContinue : onNext
             }

@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
-import { FiActivity, FiArrowRight, FiCheck, FiCloud, FiCpu, FiDatabase, FiFile, FiSearch, FiSettings, FiZap } from 'react-icons/fi';
+import React, { useEffect, useMemo, useState } from 'react';
+import { FiActivity, FiArrowRight, FiCheck, FiCloud, FiCpu, FiDatabase, FiFile, FiFolder, FiLink, FiSearch, FiSettings, FiZap } from 'react-icons/fi';
 import CloudPortalScanModal from './orchestration/CloudPortalScanModal';
+import { apiUrl } from '../hooks/useApi';
 import './PipelineIntelligence.css';
 
 const TARGETS = [
-  { id: 'aws', label: 'AWS Connected', icon: <FiCloud /> },
-  { id: 'azure', label: 'Azure Active (SSO)', icon: <FiCloud /> },
-  { id: 'fabric', label: 'Microsoft Fabric', icon: <FiZap /> },
+  { id: 'aws', sourceType: 'AWS', label: 'AWS Connected', icon: <FiCloud />, scan: true },
+  { id: 'azure', sourceType: 'AZURE', label: 'Azure Active (SSO)', icon: <FiCloud />, scan: true },
+  { id: 'fabric', sourceType: 'FABRIC', label: 'Microsoft Fabric', icon: <FiZap />, scan: true },
+  { id: 'api', sourceType: 'REST_API', label: 'REST API', icon: <FiLink />, scan: false },
+  { id: 'local', sourceType: 'LOCAL', label: 'Local Files', icon: <FiFolder />, scan: false },
 ];
 
 function JsonBlock({ value }) {
@@ -40,18 +43,67 @@ function AlertList({ title, items, tone = 'warning' }) {
   );
 }
 
-export default function PipelineIntelligence({ clientName, initialData, onScanComplete, onConfirm }) {
+function hasApiScanDetails(apiSources = []) {
+  return (apiSources || []).some((source) => {
+    const endpoints = Array.isArray(source.endpoints)
+      ? source.endpoints
+      : String(source.endpoints || '').split(',').map((item) => item.trim()).filter(Boolean);
+    return !!source.base_url && endpoints.length > 0;
+  });
+}
+
+export default function PipelineIntelligence({ clientName, initialData, clientSourceTypes = [], currentSourceType = '', apiSources = [], onScanComplete, onConfirm }) {
   const [data, setData] = useState(initialData || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [target, setTarget] = useState(initialData?.ingestion_details?.target || 'aws');
   const [useCloudLlm, setUseCloudLlm] = useState(true);
   const [showCloudScanModal, setShowCloudScanModal] = useState(false);
+  const configuredSourceTypes = useMemo(
+    () => {
+      const values = (clientSourceTypes || []).map((item) => String(item || '').toUpperCase()).filter(Boolean);
+      const current = String(currentSourceType || '').toUpperCase();
+      const mapped = current === 'S3' ? 'AWS' : current === 'ADLS' ? 'AZURE' : current === 'API' ? 'REST_API' : current;
+      if (mapped) values.push(mapped);
+      return [...new Set(values)];
+    },
+    [clientSourceTypes, currentSourceType]
+  );
+  const allowedTargets = useMemo(
+    () => TARGETS.filter((item) => configuredSourceTypes.includes(item.sourceType)),
+    [configuredSourceTypes]
+  );
+  const selectedTarget = allowedTargets.find((item) => item.id === target);
+  const apiDetailsAvailable = hasApiScanDetails(apiSources);
+  const selectedRequiresScan = selectedTarget?.sourceType
+    ? (['AWS', 'AZURE', 'FABRIC'].includes(selectedTarget.sourceType) || (selectedTarget.sourceType === 'REST_API' && apiDetailsAvailable))
+    : false;
+  const selectedMessage = (() => {
+    if (selectedTarget?.sourceType === 'LOCAL') return 'Local File Mode: No scan required. Proceed to upload files.';
+    if (selectedTarget?.sourceType === 'REST_API' && !apiDetailsAvailable) return 'Provide API details to enable scanning';
+    return '';
+  })();
 
   const flow = data?.interactive_flow || data?.loading_flow || [];
   const support = data?.ingestion_support || {};
   const delimiter = data?.delimiter_config || {};
   const capabilities = data?.pipeline_capabilities || {};
+
+  useEffect(() => {
+    setData(initialData || null);
+    setError(null);
+    setLoading(false);
+  }, [clientName, initialData]);
+
+  useEffect(() => {
+    if (allowedTargets.length === 0) {
+      setTarget('');
+      return;
+    }
+    if (!allowedTargets.some((item) => item.id === target)) {
+      setTarget(allowedTargets[0].id);
+    }
+  }, [allowedTargets, target]);
 
   return (
     <div className="pipeline-intelligence-container">
@@ -63,7 +115,7 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
       </div>
 
       <div className="pi-target-grid">
-        {TARGETS.map((item) => (
+        {allowedTargets.map((item) => (
           <button
             key={item.id}
             className={`pi-target-card ${target === item.id ? 'selected' : ''}`}
@@ -74,14 +126,29 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
             <span>{item.label}</span>
           </button>
         ))}
+        {allowedTargets.length === 0 && (
+          <div className="pi-card pi-wide">
+            <div className="pi-card-title">No Source Type Configured</div>
+            <div className="pi-card-content">Register or upload a source for this client before running Pipeline Intelligence.</div>
+          </div>
+        )}
       </div>
 
-      <label className="pi-checkbox-row">
-        <input type="checkbox" checked={useCloudLlm} onChange={(e) => setUseCloudLlm(e.target.checked)} />
-        <span>Use GPT API to extract ingestion, source, and DQ rules</span>
-      </label>
+      {selectedMessage && (
+        <div className="pi-card pi-wide">
+          <div className="pi-card-content">{selectedMessage}</div>
+        </div>
+      )}
+
+      {selectedTarget?.sourceType !== 'LOCAL' && (
+        <label className="pi-checkbox-row">
+          <input type="checkbox" checked={useCloudLlm} onChange={(e) => setUseCloudLlm(e.target.checked)} />
+          <span>Use GPT API to extract ingestion, source, and DQ rules</span>
+        </label>
+      )}
 
       <div className="pi-scan-trigger">
+        {selectedTarget?.sourceType !== 'REST_API' && (
         <button
           className="pi-btn-confirm"
           onClick={() => {
@@ -89,13 +156,62 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
               setError('Missing client selection.');
               return;
             }
+            if (!selectedTarget) {
+              setError('No source type is configured for this client.');
+              return;
+            }
+            if (!selectedRequiresScan) {
+              setError(`${selectedTarget.label} does not require a framework scan. Continue to Data Sources and use the registered/manual source.`);
+              return;
+            }
             setError(null);
             setShowCloudScanModal(true);
           }}
-          disabled={loading || !clientName}
+          disabled={loading || !clientName || !selectedRequiresScan}
         >
           <FiSearch /> Scan Framework
         </button>
+        )}
+        {selectedTarget?.sourceType === 'REST_API' && apiDetailsAvailable && (
+          <button
+            className="pi-btn-confirm"
+            onClick={async () => {
+              setLoading(true);
+              setError(null);
+              try {
+                const response = await fetch(apiUrl('/discovery/api-scan'), {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ client_name: clientName }),
+                });
+                if (!response.ok) {
+                  let message = `API scan failed with status ${response.status}`;
+                  try {
+                    const failure = await response.json();
+                    message = failure.detail || failure.message || message;
+                  } catch {}
+                  throw new Error(message);
+                }
+                const result = await response.json();
+                setData(result);
+                onScanComplete?.(result);
+              } catch (scanError) {
+                setError(scanError?.message || 'REST API scan failed.');
+              } finally {
+                setLoading(false);
+              }
+            }}
+            disabled={loading || !clientName}
+            type="button"
+          >
+            <FiSearch /> Scan REST API
+          </button>
+        )}
+        {selectedTarget && !selectedRequiresScan && (
+          <button className="pi-btn-secondary" onClick={() => onConfirm(null)} type="button">
+            Continue to Data Sources
+          </button>
+        )}
       </div>
 
       {loading && (
@@ -264,6 +380,8 @@ export default function PipelineIntelligence({ clientName, initialData, onScanCo
         <CloudPortalScanModal
           selectedClient={clientName}
           initialTarget={target}
+          allowedTargets={allowedTargets.filter((item) => item.scan).map((item) => item.id)}
+          sourceType={selectedTarget?.sourceType}
           useCloudLlm={useCloudLlm}
           onTargetChange={setTarget}
           onClose={() => {

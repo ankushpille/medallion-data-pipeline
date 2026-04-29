@@ -35,7 +35,7 @@ function backendUrl(path) {
   return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
-export default function CloudPortalScanModal({ selectedClient, initialTarget = 'aws', useCloudLlm = true, onTargetChange, onClose, onScanComplete }) {
+export default function CloudPortalScanModal({ selectedClient, initialTarget = 'aws', allowedTargets = ['aws', 'azure', 'fabric'], sourceType = '', useCloudLlm = true, onTargetChange, onClose, onScanComplete }) {
   const [target, setTarget] = useState(initialTarget);
   const [credentials, setCredentials] = useState(EMPTY_CREDS);
   const [loading, setLoading] = useState(false);
@@ -57,6 +57,19 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
       return window.location.origin;
     }
   }, []);
+  const visiblePortals = useMemo(
+    () => PORTALS.filter((portal) => (allowedTargets || []).includes(portal.id)),
+    [allowedTargets]
+  );
+
+  useEffect(() => {
+    if (visiblePortals.length === 0) return;
+    if (!visiblePortals.some((portal) => portal.id === target)) {
+      const nextTarget = visiblePortals[0].id;
+      setTarget(nextTarget);
+      onTargetChange?.(nextTarget);
+    }
+  }, [visiblePortals, target, onTargetChange]);
 
   const updateCredential = (key, value) => {
     setCredentials((prev) => ({
@@ -232,6 +245,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         body: JSON.stringify({
           client_name: selectedClient,
           target,
+          source_type: sourceType,
           scan_mode: 'live',
           auth_mode: authMode,
           credentials: requestCredentials,
@@ -277,7 +291,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         </div>
 
         <div className="cloud-scan-portals">
-          {PORTALS.map((portal) => (
+          {visiblePortals.map((portal) => (
             <button
               key={portal.id}
               type="button"

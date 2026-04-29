@@ -102,6 +102,7 @@ def _discover(state: Dict) -> Dict:
         # 1. First search for precise matches
         query = sess.query(MasterConfigAuthoritative).filter(
             MasterConfigAuthoritative.client_name == client,
+            MasterConfigAuthoritative.source_type == src,
             MasterConfigAuthoritative.is_active == True
         )
         if search_targets:

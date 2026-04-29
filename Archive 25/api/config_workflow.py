@@ -472,6 +472,7 @@ def _persist_generated_rows(
         "ingestion_type": intelligence.get("ingestion_types") or [],
         "pipeline_capabilities": intelligence.get("pipeline_capabilities") or {},
         "source_path": source_path or intelligence.get("ingestion_details", {}).get("source_path"),
+        "framework": intelligence.get("framework"),
         "scan_status": intelligence.get("scan_status"),
         "auth_mode": intelligence.get("auth_mode"),
         "is_fallback": bool(intelligence.get("is_fallback")),

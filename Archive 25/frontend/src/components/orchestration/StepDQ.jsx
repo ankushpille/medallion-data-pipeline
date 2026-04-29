@@ -87,7 +87,7 @@ export default function StepDQ({
                   className={`source-card ${editingConfigDataset === d.dataset_id ? 'selected' : ''}`}
                 >
                   <div className="source-info">
-                    <div className="source-name">{d.dataset_name || d.dataset_id}</div>
+                    <div className="source-name">{d.dataset_name || d.source_object || d.display_name || d.file_name || d.dataset_id}</div>
                     <div className="source-url">{d.dataset_id}</div>
                   </div>
                   <div className="source-actions">

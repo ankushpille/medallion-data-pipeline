@@ -75,6 +75,9 @@ const PipelineNode = ({ data }) => {
 
 const NODE_TYPES = { pipelineNode: PipelineNode };
 
+function displayDatasetName(row = {}) {
+  return row.dataset_name || row.source_object || row.file_name || row.name || 'Dataset';
+}
 
 export default function StepProgress({
   orchestrateResp, isOrchestrating, loading,
@@ -107,6 +110,13 @@ export default function StepProgress({
     }
     const rawResults = Array.isArray(orchestrateResp) ? orchestrateResp : (orchestrateResp?.progress || []);
     const streamNode = Array.isArray(orchestrateResp) ? null : orchestrateResp?.node;
+
+    if (orchestrateResp?.completed || orchestrateResp?.refreshKey) {
+      setAccumulatedResults(rawResults);
+      setActiveTab(rawResults[0]?.dataset_id || null);
+      setSelectedNodeId(null);
+      return;
+    }
     
     // If orchestrateResp was reset to empty (Rerun case), clear our internal state.
     // But do NOT clear on terminal summary packets that may omit `progress`.
@@ -557,7 +567,7 @@ export default function StepProgress({
                         const isSuccess = res.status === 'SUCCESS';
                         const dq = m.dq_details || {};
                         const vCount = (dq.violations || []).reduce((acc, v) => acc + parseInt(v.count || 0), 0);
-                        const displayName = res.dataset_name || res.dataset_id;
+                        const displayName = displayDatasetName(res);
                         
                         return (
                           <tr key={idx}>
@@ -696,10 +706,10 @@ export default function StepProgress({
                       key={ds.dataset_id}
                       className={`execution-tab ${isActive ? 'active' : ''}`}
                       onClick={() => { setActiveTab(ds.dataset_id); setSelectedNodeId(null); setActiveLayer(null); setPreviewData(null); }}
-                      title={ds.dataset_name || ds.dataset_id}
+                      title={displayDatasetName(ds)}
                     >
                       <div className="tab-label">
-                        {ds.dataset_name || ds.dataset_id}
+                        {displayDatasetName(ds)}
                       </div>
                       <div className="tab-badges">
                         {stats.error > 0 && <span className="tab-pill error">{stats.error}</span>}
