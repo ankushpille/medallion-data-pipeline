@@ -21,7 +21,7 @@ export default function StepDQ({
   editingRuleDrafts, setEditingRuleDrafts,
   toggleColumnActive, changeColumnSeverity, saveColumnRule,
   saveDqConfig, editingConfigSaving,
-  formatDatasetLabel, onRunOrchestration, isOrchestrating,
+  formatDatasetLabel, onNext, onRunOrchestration, isOrchestrating,
   datasetsLoading
 }) {
   const navigate = useNavigate();
@@ -53,6 +53,7 @@ export default function StepDQ({
           <div className="config-chip"><strong>Client:</strong> {selectedClient}</div>
           <div className="config-chip"><strong>Source:</strong> {sourceType}</div>
           <div className="config-chip"><strong>Endpoint:</strong> {folderPath}</div>
+          <div className="config-chip"><strong>Default DQ:</strong> null_check, schema_validation, datatype_check as warnings</div>
         </div>
 
         {/* Detected Datasets */}
@@ -76,7 +77,7 @@ export default function StepDQ({
                 ))}
               </div>
             ) : datasets.length === 0 ? (
-              <div className="empty-source">No datasets found. Run orchestration first to discover.</div>
+              <div className="empty-source">No datasets found yet. Continue is allowed; DQ warnings will be prepared during execution.</div>
             ) : (
               datasets.map((d, i) => (
                 <motion.div
@@ -114,10 +115,13 @@ export default function StepDQ({
       <div className="step-footer">
         <button
           className="orch-btn primary step-next-btn"
-          onClick={onRunOrchestration}
+          onClick={onNext || onRunOrchestration}
           disabled={isOrchestrating}
-          style={{ minWidth: 200, fontWeight: 800 }}
+          style={{ minWidth: 200, fontWeight: 800, fontSize: 0 }}
         >
+          <span style={{ fontSize: 14 }}>
+            {isOrchestrating ? 'Running...' : (onNext ? 'Continue to Review ->' : 'Run Orchestration')}
+          </span>
           {isOrchestrating ? 'Running...' : '🚀 Run Orchestration'}
         </button>
       </div>

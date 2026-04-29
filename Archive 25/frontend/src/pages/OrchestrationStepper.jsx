@@ -9,6 +9,7 @@ import FluentSelect from '../components/FluentSelect';
 import StepClient from '../components/orchestration/StepClient';
 import StepSources from '../components/orchestration/StepSources';
 import StepConfig from '../components/orchestration/StepConfig';
+import StepDQ from '../components/orchestration/StepDQ';
 import StepProgress from '../components/orchestration/StepProgress';
 import StepReviewConfirm from '../components/orchestration/StepReviewConfirm';
 import PipelineIntelligence from '../components/PipelineIntelligence';
@@ -21,8 +22,9 @@ const STEPS = [
   { num: 2, label: 'Intelligence' },
   { num: 3, label: 'Data Sources' },
   { num: 4, label: 'Configuration' },
-  { num: 5, label: 'Review & Confirm' },
-  { num: 6, label: 'Execution' },
+  { num: 5, label: 'DQ Rules' },
+  { num: 6, label: 'Review & Confirm' },
+  { num: 7, label: 'Execution' },
 ];
 
 export default function OrchestrationStepper({ hideHeader = false }) {
@@ -66,9 +68,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
-    client_name: '', source_name: '', base_url: '', auth_type: 'none',
+    client_name: '', source_name: '', source_type: 'API', base_url: '', auth_type: 'none',
     auth_token: '', api_key_header: 'X-Api-Key', endpoints: '',
-    aws_access_key_id: '', aws_secret_access_key: '', region: '', bucket_name: ''
+    aws_access_key_id: '', aws_secret_access_key: '', region: '', bucket_name: '',
+    azure_account_name: '', azure_account_key: '', azure_container_name: ''
   });
   const [savingSource, setSavingSource] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
@@ -120,12 +123,17 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   async function fetchApiSourcesForClient(client) {
     setApiSourcesLoading(true);
     try {
-      const res = await call('/api-source/list');
+      const res = await call(`/api-source/list?client_name=${encodeURIComponent(client)}`);
       const list = (res.configs || []).filter(s => String(s.client_name).toLowerCase() === String(client).toLowerCase());
+      console.debug('Fetched registered sources', {
+        client_name: client,
+        total: list.length,
+        source_types: list.map(s => s.source_type),
+      });
 
-      const apis = list.filter(s => !s.source_type || s.source_type.toUpperCase() === 'API');
-      const s3s = list.filter(s => s.source_type && s.source_type.toUpperCase() === 'S3');
-      const adl = list.filter(s => s.source_type && s.source_type.toUpperCase() === 'ADLS');
+      const apis = list.filter(s => String(s.source_type || 'API').toUpperCase() === 'API');
+      const s3s = list.filter(s => String(s.source_type || '').toUpperCase() === 'S3');
+      const adl = list.filter(s => String(s.source_type || '').toUpperCase() === 'ADLS');
 
       setApiSources(apis);
       setS3Sources(s3s);
@@ -173,7 +181,11 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       if (data.status && data.status.toUpperCase() === 'SUCCESS') {
         toast(`Uploaded ${data.uploaded || 0} files`, 'success');
         setSourceType('LOCAL');
-        setFolderPath(`upload/${selectedClient}`);
+        const uploadedIds = (data.results || []).map(r => r.dataset_id).filter(Boolean).join(',');
+        const localSelection = uploadedIds || `upload/${selectedClient}`;
+        setFolderPath(localSelection);
+        setSelectedEndpoint(localSelection);
+        setSelectedApiSource('local-multi');
         setShowUploadModal(false);
         setUploadFiles(null);
         // Refresh master list and sources list to show the new landing zone
@@ -208,7 +220,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   // Orchestration
   async function runOrchestration() {
     if (!selectedClient) return toast('Select a client first', 'error');
-    if (!intelligenceData || intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || intelligenceData.auth_mode === 'none' || intelligenceData.pipeline_capabilities?.scan_mode === 'mock') {
+    const runningIntelligenceSuggestion = selectedApiSource === 'intelligence-scan';
+    if (runningIntelligenceSuggestion && (!intelligenceData || intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || intelligenceData.auth_mode === 'none' || intelligenceData.pipeline_capabilities?.scan_mode === 'mock')) {
       console.debug('Execution validation failed', {
         hasIntelligence: !!intelligenceData,
         is_fallback: intelligenceData?.is_fallback,
@@ -218,19 +231,25 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       });
       return toast('Please perform a real scan using credentials before execution.', 'error');
     }
-    if (!configPersisted) {
+    if (runningIntelligenceSuggestion && !configPersisted) {
       console.debug('Execution validation failed: config not persisted');
       return toast('Save generated configuration before execution.', 'error');
     }
     if (!sourceType) return toast('Specify source_type', 'error');
     if (!folderPath) return toast('Specify folder_path', 'error');
+    console.debug('Execution trigger validation passed', {
+      client_name: selectedClient,
+      source_type: sourceType,
+      folder_path: folderPath,
+      selected_source: selectedApiSource,
+    });
 
-    setStep(6);
+    setStep(7);
     setOrchestrateResp({ progress: [] });
     setIsOrchestrating(true);
     try {
       toast('Running orchestration — streaming progress...', 'info');
-      const qs = `?source_type=${encodeURIComponent(sourceType)}&client_name=${encodeURIComponent(selectedClient)}&folder_path=${encodeURIComponent(folderPath)}&require_real_scan=true`;
+      const qs = `?source_type=${encodeURIComponent(sourceType)}&client_name=${encodeURIComponent(selectedClient)}&folder_path=${encodeURIComponent(folderPath)}&require_real_scan=${runningIntelligenceSuggestion ? 'true' : 'false'}`;
       const response = await fetch(apiUrl(`/orchestrate/run${qs}`), {
         method: 'POST',
         headers: { 'Accept': 'application/x-ndjson' }
@@ -416,31 +435,49 @@ export default function OrchestrationStepper({ hideHeader = false }) {
 
   async function registerSource() {
     const { source_type, client_name, source_name, base_url, bucket_name, azure_account_name, azure_container_name } = sourceForm;
+    const normalizedSourceType = String(source_type || 'API').toUpperCase();
 
     if (!client_name) return toast('Client Name is required', 'error');
     if (!source_name) return toast('Source Name is required', 'error');
 
-    if (source_type === 'API' && !base_url) {
+    if (normalizedSourceType === 'API' && !base_url) {
       return toast('Base URL is required for API registration', 'error');
     }
-    if (source_type === 'S3' && !bucket_name) {
+    if (normalizedSourceType === 'S3' && !bucket_name) {
       return toast('Bucket Name is required for S3 registration', 'error');
     }
-    if (source_type === 'ADLS' && (!azure_account_name || !azure_container_name)) {
+    if (normalizedSourceType === 'ADLS' && (!azure_account_name || !azure_container_name)) {
       return toast('Azure Account Name and Container Name are required', 'error');
     }
 
     setSavingSource(true);
 
     try {
-      await call('/api-source/register', 'POST', sourceForm);
-      toast('API Source registered successfully', 'success');
+      await call('/api-source/register', 'POST', { ...sourceForm, source_type: normalizedSourceType });
+      toast(`${normalizedSourceType} source registered successfully`, 'success');
+      setSelectedClient(client_name);
       setSourceForm({
-        client_name: '', source_name: '', base_url: '', auth_type: 'none',
+        client_name: '', source_name: '', source_type: 'API', base_url: '', auth_type: 'none',
         auth_token: '', api_key_header: 'X-Api-Key', endpoints: '',
-        aws_access_key_id: '', aws_secret_access_key: '', region: '', bucket_name: ''
+        aws_access_key_id: '', aws_secret_access_key: '', region: '', bucket_name: '',
+        azure_account_name: '', azure_account_key: '', azure_container_name: ''
       });
-      fetchClients();
+      await fetchClients();
+      await fetchApiSourcesForClient(client_name);
+      if (normalizedSourceType === 'S3') {
+        setSourceType('S3');
+        setFolderPath(`s3://${bucket_name}`);
+        setSelectedEndpoint(`s3://${bucket_name}`);
+      } else if (normalizedSourceType === 'ADLS') {
+        setSourceType('ADLS');
+        setFolderPath(`az://${azure_account_name}/${azure_container_name}`);
+        setSelectedEndpoint(`az://${azure_account_name}/${azure_container_name}`);
+      } else if (normalizedSourceType === 'API') {
+        setSourceType('API');
+        const firstEndpoint = String(sourceForm.endpoints || '').split(',').map(v => v.trim()).filter(Boolean)[0] || base_url;
+        setFolderPath(firstEndpoint);
+        setSelectedEndpoint(firstEndpoint);
+      }
     } catch (e) {
       toast('Registration failed: ' + (e?.message || e), 'error');
     } finally {
@@ -769,18 +806,55 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                 />
               )}
               {step === 5 && (
+                <StepDQ
+                  selectedClient={selectedClient}
+                  sourceType={sourceType}
+                  folderPath={folderPath}
+                  datasets={datasets}
+                  fetchDatasets={fetchDatasets}
+                  editingConfigDataset={editingConfigDataset}
+                  setEditingConfigDataset={setEditingConfigDataset}
+                  editingConfigColumns={editingConfigColumns}
+                  editingConfigLoading={editingConfigLoading}
+                  selectedDqDataset={selectedDqDataset}
+                  setSelectedDqDataset={setSelectedDqDataset}
+                  showDQPanel={showDQPanel}
+                  setShowDQPanel={setShowDQPanel}
+                  loadDqConfig={loadDqConfig}
+                  setPendingDqDataset={setPendingDqDataset}
+                  setShowModeModal={setShowModeModal}
+                  dqError={dqError}
+                  setDqError={setDqError}
+                  dqLoading={dqLoading}
+                  isSuggesting={isSuggesting}
+                  editingRuleDrafts={editingRuleDrafts}
+                  setEditingRuleDrafts={setEditingRuleDrafts}
+                  toggleColumnActive={toggleColumnActive}
+                  changeColumnSeverity={changeColumnSeverity}
+                  saveColumnRule={saveColumnRule}
+                  saveDqConfig={saveDqConfig}
+                  editingConfigSaving={editingConfigSaving}
+                  formatDatasetLabel={formatDatasetLabel}
+                  onNext={() => setStep(6)}
+                  onRunOrchestration={runOrchestration}
+                  isOrchestrating={isOrchestrating}
+                  datasetsLoading={datasetsLoading}
+                />
+              )}
+              {step === 6 && (
                 <StepReviewConfirm
                   selectedClient={selectedClient}
                   sourceType={sourceType}
                   folderPath={folderPath}
                   intelligenceData={intelligenceData}
                   configPersisted={configPersisted}
-                  onBack={() => setStep(4)}
+                  requiresRealScan={selectedApiSource === 'intelligence-scan'}
+                  onBack={() => setStep(5)}
                   onConfirm={runOrchestration}
                   isOrchestrating={isOrchestrating}
                 />
               )}
-              {step === 6 && (
+              {step === 7 && (
                 <StepProgress
                   orchestrateResp={orchestrateResp}
                   isOrchestrating={isOrchestrating}

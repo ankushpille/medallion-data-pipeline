@@ -24,7 +24,7 @@ from core.master_config_manager import MasterConfigManager
 from core.pipeline_service import PipelineService
 from core.settings import settings
 from core.azure_storage import get_storage_client
-from models.dq_schema_config import DQSchemaConfig, ExpectedDataType, Severity
+from models.dq_schema_config import DQSchemaConfig, ExpectedDataType, DQRule, Severity
 from core.database import SessionLocal
 from core.utils import generate_dataset_id
 import hashlib
@@ -396,7 +396,7 @@ def _prepare_dq(state: Dict) -> Dict:
                 if exists:
                     continue
                 et = types.get(c, ExpectedDataType.STRING)
-                sess.add(DQSchemaConfig(dataset_id=dsid, column_name=c, expected_data_type=et, dq_rule=None, rule_value=None, severity=Severity.INFO, is_active=False))
+                sess.add(DQSchemaConfig(dataset_id=dsid, column_name=c, expected_data_type=et, dq_rule=DQRule.NOT_NULL, rule_value=None, severity=Severity.WARN, is_active=True))
             sess.commit()
         except Exception:
             pass

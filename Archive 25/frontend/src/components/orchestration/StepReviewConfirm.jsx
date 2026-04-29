@@ -25,6 +25,7 @@ export default function StepReviewConfirm({
   folderPath,
   intelligenceData,
   configPersisted,
+  requiresRealScan = false,
   onBack,
   onConfirm,
   isOrchestrating,
@@ -48,12 +49,13 @@ export default function StepReviewConfirm({
         }
       : null,
   };
-  const canExecute = !!intelligenceData
+  const realScanReady = !!intelligenceData
     && !intelligenceData.is_fallback
     && intelligenceData.scan_status !== 'failed'
     && intelligenceData.auth_mode !== 'none'
     && intelligenceData.pipeline_capabilities?.scan_mode !== 'mock'
     && !!configPersisted;
+  const canExecute = requiresRealScan ? realScanReady : true;
 
   return (
     <motion.div

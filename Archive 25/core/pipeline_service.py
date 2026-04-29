@@ -199,7 +199,7 @@ class PipelineService:
             if obj and fname != obj:
                 continue
             ext = fname.split(".")[-1].lower() if "." in fname else ""
-            if ext in ["csv", "xlsx", "json"]:
+            if ext in ["csv", "tsv", "xlsx", "json"]:
                 try:
                     df = self._load_as_df(self.bucket, key, ext)
                     items.append(df)
@@ -222,7 +222,7 @@ class PipelineService:
             )
             bkt = self.bucket
         ext = key.split(".")[-1].lower() if "." in key else ""
-        if ext not in ["csv", "xlsx", "json", "parquet"]:
+        if ext not in ["csv", "tsv", "xlsx", "json", "parquet"]:
             raise RuntimeError(f"unsupported raw file format: {ext}")
         if ext == "parquet":
             obj = self.s3.get_object(Key=key, Container=bkt)
@@ -257,6 +257,8 @@ class PipelineService:
         data = obj["Body"].read()
         if ext == "csv":
             return pd.read_csv(io.BytesIO(data))
+        if ext == "tsv":
+            return pd.read_csv(io.BytesIO(data), sep="\t")
         if ext == "xlsx":
             return pd.read_excel(io.BytesIO(data))
         if ext == "json":

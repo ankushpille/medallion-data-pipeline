@@ -140,6 +140,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     Register a data source for a client.
     Supported types: API, S3, ADLS.
     """
+    source_type = (request.source_type or "API").upper().strip()
     existing = db.query(APISourceConfig).filter(
         APISourceConfig.client_name == request.client_name,
         APISourceConfig.source_name == request.source_name
@@ -155,7 +156,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     config = APISourceConfig(
         client_name    = request.client_name,
         source_name    = request.source_name,
-        source_type    = request.source_type or "API",
+        source_type    = source_type,
         base_url       = request.base_url.rstrip("/") if request.base_url else None,
         auth_type      = request.auth_type or "none",
         auth_token     = request.auth_token,
@@ -178,7 +179,11 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     db.add(config)
     db.commit()
     db.refresh(config)
-    logger.info(f"Registered {config.source_type} source \'{request.source_name}\' for client \'{request.client_name}\'")
+    logger.info(
+        f"Registered {config.source_type} source for client={request.client_name}, "
+        f"source_name={request.source_name}, bucket={request.bucket_name or ''}, "
+        f"container={request.azure_container_name or ''}, region={request.region or ''}"
+    )
 
     return {
         "status":    "registered",
@@ -193,6 +198,7 @@ def list_sources(client_name: Optional[str] = None, db: Session = Depends(get_db
     if client_name:
         query = query.filter(APISourceConfig.client_name == client_name)
     configs = query.order_by(APISourceConfig.client_name).all()
+    logger.info(f"Listing registered sources: client_name={client_name or '*'}, count={len(configs)}")
     results = []
     for c in configs:
         d = c.to_dict()

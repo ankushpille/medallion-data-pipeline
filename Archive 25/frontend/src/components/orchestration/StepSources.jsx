@@ -89,6 +89,12 @@ export default function StepSources({
   const [activeTab, setActiveTab] = useState("LOCAL");
 
   useEffect(() => {
+    if (!intelligenceData && ["LOCAL", "API", "S3", "ADLS"].includes(String(sourceType || "").toUpperCase())) {
+      setActiveTab(String(sourceType).toUpperCase());
+    }
+  }, [sourceType, intelligenceData]);
+
+  useEffect(() => {
     if (intelligenceData?.ingestion_support) {
       const details =
         intelligenceData.ingestion_details ||
@@ -262,13 +268,35 @@ export default function StepSources({
     };
   };
 
+  const findRegisteredSuggestionSource = (suggestion) => {
+    if (!suggestion) return null;
+    const path = String(suggestion.path || "");
+    if (suggestion.type === "S3") {
+      const bucket = path.startsWith("s3://") ? path.slice(5).split("/")[0] : "";
+      return s3Sources.find((s) => s.bucket_name === bucket || s.aws_bucket === bucket) || null;
+    }
+    if (suggestion.type === "ADLS") {
+      return adlsSources.find((s) => path.includes(`${s.azure_account}/${s.azure_container}`)) || null;
+    }
+    if (suggestion.type === "API") {
+      return apiSources.find((s) => path.startsWith(s.base_url || "") || (s.endpoints || []).includes(path)) || null;
+    }
+    return null;
+  };
+
   const applyIntelligenceSuggestion = () => {
     const suggestion = getIntelligenceSuggestion();
     if (!suggestion) return;
+    const registered = findRegisteredSuggestionSource(suggestion);
+    if (["S3", "ADLS", "API"].includes(suggestion.type) && !registered) {
+      toast?.("Suggestion is not mapped to a registered source yet. Register the source first, or add it manually.", "warning");
+      if (suggestion.tab) setActiveTab(suggestion.tab);
+      return;
+    }
     setSourceType(suggestion.type);
     setFolderPath(suggestion.path || "");
     setSelectedEndpoint(suggestion.path || "");
-    setSelectedApiSource("intelligence-scan");
+    setSelectedApiSource(registered?.id || "intelligence-scan");
     if (suggestion.tab) setActiveTab(suggestion.tab);
   };
 
@@ -469,8 +497,10 @@ export default function StepSources({
   const renderIntelligenceSuggestions = () => {
     const suggestion = getIntelligenceSuggestion();
     if (!suggestion) return null;
+    const registeredSuggestionSource = findRegisteredSuggestionSource(suggestion);
     const isApplied =
-      selectedApiSource === "intelligence-scan" &&
+      !!registeredSuggestionSource &&
+      selectedApiSource === registeredSuggestionSource.id &&
       selectedEndpoint === suggestion.path;
     return (
       <div
@@ -543,7 +573,7 @@ export default function StepSources({
               className="orch-btn tiny"
               onClick={applyIntelligenceSuggestion}
             >
-              {isApplied ? "Applied" : "Add to Sources"}
+              {isApplied ? "Applied" : (registeredSuggestionSource ? "Add to Sources" : "Register Source First")}
             </button>
           </div>
         </div>
@@ -667,6 +697,16 @@ export default function StepSources({
                       {apiSources.length}
                     </span>
                   )}
+                  {t.id === "S3" && s3Sources.length > 0 && (
+                    <span className="tab-badge" style={{ background: t.color }}>
+                      {s3Sources.length}
+                    </span>
+                  )}
+                  {t.id === "ADLS" && adlsSources.length > 0 && (
+                    <span className="tab-badge" style={{ background: t.color }}>
+                      {adlsSources.length}
+                    </span>
+                  )}
                 </div>
               </button>
             ))}
@@ -711,14 +751,17 @@ export default function StepSources({
                       className={`source-card ${selectedApiSource === s.id ? "selected" : ""}`}
                       onClick={() => {
                         setSelectedApiSource(s.id);
+                        setSourceType("API");
                         if (
                           s.endpoints &&
                           s.endpoints.length > 0 &&
                           !selectedEndpoint
                         ) {
                           setSelectedEndpoint(s.endpoints[0]);
-                          setSourceType("API");
                           setFolderPath(s.endpoints[0]);
+                        } else if (!selectedEndpoint && s.base_url) {
+                          setSelectedEndpoint(s.base_url);
+                          setFolderPath(s.base_url);
                         }
                       }}
                     >
@@ -856,6 +899,9 @@ export default function StepSources({
                       onClick={() => {
                         setSelectedApiSource(s.id);
                         setSourceType("S3");
+                        const basePath = `s3://${s.bucket_name}`;
+                        setSelectedEndpoint(basePath);
+                        setFolderPath(basePath);
                       }}
                     >
                       <div className="source-info" style={{ flex: 1 }}>
@@ -937,6 +983,9 @@ export default function StepSources({
                       onClick={() => {
                         setSelectedApiSource(s.id);
                         setSourceType("ADLS");
+                        const basePath = `az://${s.azure_account}/${s.azure_container}`;
+                        setSelectedEndpoint(basePath);
+                        setFolderPath(basePath);
                       }}
                     >
                       <div className="source-info" style={{ flex: 1 }}>

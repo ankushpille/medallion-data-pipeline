@@ -244,7 +244,10 @@ export default function StepConfig({
           </button>
           <button
             className="orch-btn primary step-next-btn"
-            onClick={() => { if (configData.length > 0) saveConfig(); onNext(); }}
+            onClick={async () => {
+              if (configData.length > 0) await saveConfig();
+              onNext();
+            }}
             disabled={loading || (configData.length === 0 && !generatedConfigText)}
           >
             Commit & Continue →

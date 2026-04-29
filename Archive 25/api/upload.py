@@ -6,7 +6,7 @@ from core.database import get_db
 from core.azure_storage import get_storage_client
 from core.settings import settings
 from models.master_config_authoritative import MasterConfigAuthoritative
-from models.dq_schema_config import DQSchemaConfig, ExpectedDataType
+from models.dq_schema_config import DQSchemaConfig, ExpectedDataType, DQRule, Severity
 from loguru import logger
 from datetime import datetime
 import hashlib, io, uuid
@@ -125,7 +125,7 @@ async def upload_ingest(
                     try: exp = ExpectedDataType[col["inferred_type"]]
                     except KeyError: pass
                     db.add(DQSchemaConfig(dataset_id=dsid, column_name=col["name"],
-                        expected_data_type=exp, dq_rule=None, rule_value=None, severity=None, is_active=False))
+                        expected_data_type=exp, dq_rule=DQRule.NOT_NULL, rule_value=None, severity=Severity.WARN, is_active=True))
             db.commit()
 
             mc_recs.append({
