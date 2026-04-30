@@ -167,7 +167,7 @@ def run(
             detail=f"Source type {requested_type} is not configured for client '{client_name}'. Configured source types: {sorted(configured_types)}"
         )
 
-    scan_required = require_real_scan or src in ("S3", "ADLS", "FABRIC") or (src == "API" and bool(folder_path))
+    scan_required = require_real_scan
     if scan_required:
         from models.master_config import MasterConfig
         configs = db.query(MasterConfig).filter(

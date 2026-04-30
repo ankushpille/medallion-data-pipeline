@@ -347,7 +347,9 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       return toast('Save generated configuration before execution.', 'error');
     }
     if (!sourceType) return toast('Specify source_type', 'error');
-    if (!folderPath) return toast('Specify folder_path', 'error');
+    if (!folderPath && !['LOCAL', 'S3'].includes(String(sourceType).toUpperCase())) {
+      return toast('Specify folder_path', 'error');
+    }
     console.debug('Execution trigger validation passed', {
       client_name: selectedClient,
       source_type: sourceType,
@@ -361,7 +363,13 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setIsOrchestrating(true);
     try {
       toast('Running orchestration — streaming progress...', 'info');
-      const qs = `?source_type=${encodeURIComponent(sourceType)}&client_name=${encodeURIComponent(selectedClient)}&folder_path=${encodeURIComponent(folderPath)}&require_real_scan=${runningIntelligenceSuggestion ? 'true' : 'false'}`;
+      const params = new URLSearchParams({
+        source_type: sourceType,
+        client_name: selectedClient,
+        require_real_scan: runningIntelligenceSuggestion ? 'true' : 'false',
+      });
+      if (folderPath) params.set('folder_path', folderPath);
+      const qs = `?${params.toString()}`;
       const response = await fetch(apiUrl(`/orchestrate/run${qs}`), {
         method: 'POST',
         headers: { 'Accept': 'application/x-ndjson' }
