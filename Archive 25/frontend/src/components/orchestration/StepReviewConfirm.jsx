@@ -32,13 +32,16 @@ export default function StepReviewConfirm({
   fabricMode = 'DISCOVERY',
   pipelineDeployed = false,
 }) {
+  const isFabricDeploy = fabricMode === 'DEPLOY';
+  const isFabricReady = isFabricDeploy && !!configPersisted;
+  
   const executionPayload = {
     endpoint: '/orchestrate/run',
     method: 'POST',
     query: {
-      source_type: sourceType,
-      client_name: selectedClient,
-      folder_path: folderPath,
+      source_type: isFabricDeploy ? 'FABRIC' : sourceType,
+      client_name: selectedClient || localStorage.getItem('client_name') || 'fabric_client',
+      folder_path: folderPath || (isFabricDeploy ? intelligenceData?.reformatted_config?.source_path : ''),
     },
     intelligence: intelligenceData
       ? {
@@ -51,9 +54,7 @@ export default function StepReviewConfirm({
         }
       : null,
   };
-  const isFabricDeploy = fabricMode === 'DEPLOY';
-  const isFabricReady = isFabricDeploy && !!configPersisted;
-  
+
   const realScanReady = !!intelligenceData
     && (isFabricDeploy || (!intelligenceData.is_fallback && intelligenceData.auth_mode !== 'none' && intelligenceData.pipeline_capabilities?.scan_mode !== 'mock'))
     && intelligenceData.scan_status !== 'failed'

@@ -30,6 +30,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
 
   const handleSelectClient = (c) => {
     setSelectedClient(c);
+    localStorage.setItem('client_name', c);
   };
 
   const deleteClient = (e, c) => {

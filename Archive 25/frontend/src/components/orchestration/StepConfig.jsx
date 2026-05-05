@@ -65,8 +65,9 @@ export default function StepConfig({
     setSaving(true);
     
     // Prepare payload
+    const clientName = selectedClient || localStorage.getItem('client_name') || "fabric_client";
     let payload = {
-      client_name: selectedClient || "fabric_client",
+      client_name: clientName,
       config: configData
     };
 
