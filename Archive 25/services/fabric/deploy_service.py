@@ -1,6 +1,8 @@
 import httpx
 import json
 import base64
+import zipfile
+import io
 from fastapi import HTTPException
 
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
@@ -12,57 +14,77 @@ class FabricDeployService:
             "Content-Type": "application/json"
         }
 
-    async def deploy_pipeline(self, workspace_id: str, pipeline_name: str, definition_content: dict):
-        """Creates or updates a pipeline from a JSON definition"""
+    async def deploy_pipeline(self, workspace_id: str, file_bytes: bytes):
+        """Automated ZIP-based deployment: Dynamically detects content and deploys"""
+        
+        # 1. Extract content from ZIP with flexible detection
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                json_files = [f for f in z.namelist() if f.endswith('.json')]
+                
+                pipeline_file = None
+                manifest_file = None
+                
+                for f in json_files:
+                    if 'manifest.json' in f.lower():
+                        manifest_file = f
+                    else:
+                        # Assume the first other JSON is the pipeline content
+                        pipeline_file = f
+                
+                if not pipeline_file:
+                    raise HTTPException(status_code=400, detail="No pipeline JSON file found in ZIP")
+                
+                pipeline_content = z.read(pipeline_file).decode('utf-8')
+                pipeline_name = "New Pipeline"
+                
+                if manifest_file:
+                    manifest_data = json.loads(z.read(manifest_file).decode('utf-8'))
+                    pipeline_name = manifest_data.get('displayName', pipeline_name)
+                else:
+                    # Fallback to filename (without .json)
+                    pipeline_name = pipeline_file.split('/')[-1].replace('.json', '')
+                
+                definition_dict = json.loads(pipeline_content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to process ZIP: {str(e)}")
+
+        # 2. Check if pipeline exists in workspace
         url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items"
-        
-        # Check if exists
-        items_resp = await httpx.AsyncClient().get(f"{url}?type=DataPipeline", headers=self.headers)
-        items = items_resp.json().get("value", [])
-        existing = next((i for i in items if i['displayName'] == pipeline_name), None)
-        
-        definition_b64 = base64.b64encode(json.dumps(definition_content).encode('utf-8')).decode('utf-8')
-        
-        if existing:
-            # Update
-            update_url = f"{url}/{existing['id']}/updateDefinition"
-            payload = {
-                "definition": {
-                    "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            items_resp = await client.get(f"{url}?type=DataPipeline", headers=self.headers)
+            items = items_resp.json().get("value", [])
+            existing = next((i for i in items if i['displayName'] == pipeline_name), None)
+            
+            definition_b64 = base64.b64encode(json.dumps(definition_dict).encode('utf-8')).decode('utf-8')
+            
+            if existing:
+                # Update Definition
+                update_url = f"{url}/{existing['id']}/updateDefinition"
+                payload = {
+                    "definition": {
+                        "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
+                    }
                 }
-            }
-            resp = await httpx.AsyncClient().post(update_url, headers=self.headers, json=payload)
-        else:
-            # Create
-            payload = {
+                resp = await client.post(update_url, headers=self.headers, json=payload)
+                pipeline_id = existing['id']
+            else:
+                # Create New
+                payload = {
+                    "displayName": pipeline_name,
+                    "type": "DataPipeline",
+                    "definition": {
+                        "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
+                    }
+                }
+                resp = await client.post(url, headers=self.headers, json=payload)
+                pipeline_id = resp.json().get('id') if resp.is_success else None
+
+            if not resp.is_success:
+                 raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error: {resp.text}")
+            
+            return {
+                "id": pipeline_id,
                 "displayName": pipeline_name,
-                "type": "DataPipeline",
-                "definition": {
-                    "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
-                }
+                "status": "Success"
             }
-            resp = await httpx.AsyncClient().post(url, headers=self.headers, json=payload)
-        
-        if not resp.is_success:
-             raise HTTPException(status_code=resp.status_code, detail=f"Deployment failed: {resp.text}")
-        
-        result = resp.json()
-        pipeline_id = result.get('id')
-        
-        # Fetch full definition for intelligence
-        get_url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/getDefinition"
-        get_resp = await httpx.AsyncClient().post(get_url, headers=self.headers)
-        
-        pipeline_json = {}
-        if get_resp.is_success:
-            parts = get_resp.json().get("definition", {}).get("parts", [])
-            for part in parts:
-                if part.get("path") == "pipeline-content.json":
-                    pipeline_json = json.loads(base64.b64decode(part.get("payload")).decode('utf-8'))
-                    break
-        
-        return {
-            "id": pipeline_id,
-            "displayName": pipeline_name,
-            "pipeline_json": pipeline_json
-        }

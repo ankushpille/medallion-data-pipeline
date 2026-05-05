@@ -20,6 +20,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
   const [searchQuery, setSearchQuery] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [clientToDelete, setClientToDelete] = useState(null);
+  const [fabricWorkspace, setFabricWorkspace] = useState(null);
 
   const filteredClients = (clients || []).filter(c =>
     c.toLowerCase().includes(searchQuery.toLowerCase())
@@ -487,6 +488,8 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                             token={sourceForm.fabricToken} 
                             call={call} 
                             toast={toast} 
+                            selectedWorkspace={fabricWorkspace}
+                            setSelectedWorkspace={setFabricWorkspace}
                             onPipelineSelected={(data) => {
                                setSourceForm({ ...sourceForm, fabricDiscoveryData: data });
                                toast('Pipeline discovery complete!', 'success');
@@ -497,6 +500,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                             token={sourceForm.fabricToken} 
                             call={call} 
                             toast={toast} 
+                            selectedWorkspace={fabricWorkspace}
                             onDeploySuccess={(data) => {
                                setSourceForm({ ...sourceForm, fabricDiscoveryData: data });
                                toast('Pipeline deployed and captured!', 'success');

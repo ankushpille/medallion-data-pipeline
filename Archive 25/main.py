@@ -18,8 +18,15 @@ from api.api_fabric import router as fabric_router
 from core.logger import setup_logger
 from dotenv import load_dotenv
 from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi import UploadFile, File, Form, HTTPException
+from typing import Annotated, Optional
+import json
+import logging
+from services.fabric.pipeline_parser import parse_pipeline_zip, remap_pipeline
+from services.fabric.workspace_service import FabricWorkspaceService
+from services.fabric.pipeline_service import FabricPipelineService
+from services.fabric.deploy_service import FabricDeployService
 
 # Load this backend's .env explicitly so running uvicorn from another working
 # directory cannot accidentally pick up another project's environment.
@@ -184,3 +191,89 @@ try:
                 pass
 except Exception:
     pass
+# ─── Legacy Deployment Route (Ported from Discovery Agent) ──────────────────
+
+@app.post("/deploy/execute", tags=["Fabric Deployment"])
+async def deploy_pipeline_execute(
+    zip_file: Annotated[UploadFile, File(description="Fabric pipeline ZIP")],
+    access_token: Annotated[str, Form(description="Azure AD Token")],
+    target_workspace_id: Annotated[str, Form(description="Target Fabric Workspace ID")],
+    pipeline_name: Annotated[Optional[str], Form()] = None
+):
+    # 1. Initialize Services
+    from services.fabric.workspace_service import FabricWorkspaceService
+    from services.fabric.pipeline_service import FabricPipelineService
+    from services.fabric.deploy_service import FabricDeployService
+    import httpx
+    
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
+
+    # 2. Parse ZIP
+    raw = await zip_file.read()
+    try:
+        parsed = parse_pipeline_zip(raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid ZIP structure: {str(e)}")
+
+    pipeline_definition = parsed["raw_definition"]
+    
+    # 3. Resolve dependencies (Auto-Remapping)
+    id_mappings = {}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # List items in target workspace
+        items_resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{target_workspace_id}/items", headers=headers)
+        target_items = items_resp.json().get("value", [])
+        
+        def auto_resolve(obj):
+            if isinstance(obj, dict):
+                if "type" in obj and obj["type"] == "Notebook":
+                    nb = obj.get("typeProperties", {}).get("notebook", {})
+                    ref_name = nb.get("referenceName")
+                    if ref_name:
+                        match = next((item for item in target_items if item.get("displayName") == ref_name and item.get("type") == "Notebook"), None)
+                        if match:
+                            id_mappings[nb.get("notebookId", "")] = match["id"]
+                            id_mappings[nb.get("workspaceId", "")] = target_workspace_id
+                for v in obj.values(): auto_resolve(v)
+            elif isinstance(obj, list):
+                for item in obj: auto_resolve(item)
+
+        auto_resolve(pipeline_definition)
+        final_definition = remap_pipeline(pipeline_definition, id_mappings)
+        
+        # 4. Versioning logic
+        pipelines_resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{target_workspace_id}/items?type=DataPipeline", headers=headers)
+        pipelines = pipelines_resp.json().get("value", [])
+        
+        original_name = (pipeline_name or "").strip() or parsed["pipeline_name"]
+        final_name = original_name
+        version = 1
+        while any(p.get("displayName") == final_name for p in pipelines):
+            final_name = f"{original_name}_v{version}"
+            version += 1
+
+        # 5. Create Pipeline
+        import base64
+        def_bytes = json.dumps(final_definition, indent=2).encode("utf-8")
+        def_b64 = base64.b64encode(def_bytes).decode("utf-8")
+
+        payload = {
+            "displayName": final_name,
+            "type": "DataPipeline",
+            "definition": {
+                "parts": [{"path": "pipeline-content.json", "payload": def_b64, "payloadType": "InlineBase64"}]
+            }
+        }
+        
+        create_resp = await client.post(f"{FABRIC_API_BASE}/workspaces/{target_workspace_id}/items", headers=headers, json=payload)
+        if not create_resp.is_success:
+            raise HTTPException(status_code=create_resp.status_code, detail=f"Fabric API Error: {create_resp.text}")
+            
+        return {
+            "workspace_id": target_workspace_id,
+            "pipeline_deployed": final_name,
+            "status": "SUCCESS",
+            "remapped_ids": len(id_mappings),
+            "fabric_response": create_resp.json()
+        }

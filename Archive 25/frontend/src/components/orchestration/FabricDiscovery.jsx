@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { FiFolder, FiBox, FiSearch, FiCheck, FiDownload, FiActivity } from 'react-icons/fi';
 import { motion, AnimatePresence } from 'framer-motion';
 
-export default function FabricDiscovery({ token, call, toast, onPipelineSelected }) {
+export default function FabricDiscovery({ token, call, toast, onPipelineSelected, selectedWorkspace, setSelectedWorkspace }) {
   const [workspaces, setWorkspaces] = useState([]);
-  const [selectedWorkspace, setSelectedWorkspace] = useState(null);
   const [pipelines, setPipelines] = useState([]);
   const [loading, setLoading] = useState(false);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
+
+  const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:8001";
 
   useEffect(() => {
     fetchWorkspaces();
@@ -16,8 +17,16 @@ export default function FabricDiscovery({ token, call, toast, onPipelineSelected
   const fetchWorkspaces = async () => {
     setLoading(true);
     try {
-      const res = await call(`/fabric/workspaces?token=${token}`);
-      setWorkspaces(res || []);
+      const response = await fetch(`${API_BASE}/fabric/workspaces`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      });
+      const data = await response.json();
+      console.log("Workspaces Data:", data);
+      // Backend returns a list, so we set it directly
+      setWorkspaces(Array.isArray(data) ? data : (data.workspaces || []));
     } catch (e) {
       toast('Failed to load workspaces', 'error');
     } finally {
@@ -29,8 +38,14 @@ export default function FabricDiscovery({ token, call, toast, onPipelineSelected
     setSelectedWorkspace(ws);
     setLoading(true);
     try {
-      const res = await call(`/fabric/pipelines?workspace_id=${ws.id}&token=${token}`);
-      setPipelines(res || []);
+      const response = await fetch(`${API_BASE}/fabric/pipelines?workspace_id=${ws.id}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      });
+      const data = await response.json();
+      setPipelines(data || []);
     } catch (e) {
       toast('Failed to load pipelines', 'error');
     } finally {
@@ -41,9 +56,16 @@ export default function FabricDiscovery({ token, call, toast, onPipelineSelected
   const handleDiscover = async (pipeline) => {
     setDiscoveryLoading(true);
     try {
-      const res = await call(`/fabric/extract?workspace_id=${selectedWorkspace.id}&pipeline_id=${pipeline.id}&token=${token}`, 'POST');
+      const response = await fetch(`${API_BASE}/fabric/extract?workspace_id=${selectedWorkspace.id}&pipeline_id=${pipeline.id}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      });
+      const data = await response.json();
       toast(`Successfully discovered ${pipeline.displayName}`, 'success');
-      onPipelineSelected(res);
+      onPipelineSelected(data);
     } catch (e) {
       toast('Discovery failed', 'error');
     } finally {

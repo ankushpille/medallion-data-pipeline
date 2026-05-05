@@ -1,36 +1,46 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { FiUploadCloud, FiCheck, FiAlertCircle } from 'react-icons/fi';
 import { motion } from 'framer-motion';
 
-export default function FabricDeploy({ token, call, toast, onDeploySuccess }) {
+export default function FabricDeploy({ token, call, toast, onDeploySuccess, selectedWorkspace }) {
   const [file, setFile] = useState(null);
-  const [pipelineName, setPipelineName] = useState('');
   const [workspaceId, setWorkspaceId] = useState('');
   const [deploying, setDeploying] = useState(false);
 
+  // Auto-fill Workspace ID when selectedWorkspace prop changes
+  useEffect(() => {
+    if (selectedWorkspace) {
+      setWorkspaceId(selectedWorkspace.id);
+    }
+  }, [selectedWorkspace]);
+
+  const API_BASE = process.env.REACT_APP_API_URL || "http://127.0.0.1:8001";
+
   const handleDeploy = async () => {
-    if (!file || !pipelineName || !workspaceId) {
-      toast('Please fill all fields and select a file', 'warning');
+    if (!workspaceId || !file) {
+      toast('Please select workspace and upload file', 'warning');
       return;
     }
 
     setDeploying(true);
     try {
       const formData = new FormData();
-      formData.append('file', file);
-      formData.append('pipeline_name', pipelineName);
-      formData.append('workspace_id', workspaceId);
-      formData.append('token', token);
+      formData.append('zip_file', file);
+      formData.append('target_workspace_id', workspaceId);
+      formData.append('access_token', token);
 
-      const res = await fetch('/fabric/deploy', {
+      const res = await fetch(`${API_BASE}/deploy/execute`, {
         method: 'POST',
         body: formData,
       });
       
-      if (!res.ok) throw new Error('Deployment failed');
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || 'Deployment failed');
+      }
       
       const data = await res.json();
-      toast('Pipeline deployed successfully!', 'success');
+      toast(`Deployed: ${data.pipeline_deployed}`, 'success');
       if (onDeploySuccess) onDeploySuccess(data);
     } catch (e) {
       toast('Deployment error: ' + e.message, 'error');
@@ -56,19 +66,10 @@ export default function FabricDeploy({ token, call, toast, onDeploySuccess }) {
           <label style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', display: 'block' }}>Target Workspace ID</label>
           <input 
             className="orch-input" 
-            placeholder="Enter Workspace GUID" 
+            placeholder="Select a workspace first" 
             value={workspaceId}
-            onChange={(e) => setWorkspaceId(e.target.value)}
-          />
-        </div>
-
-        <div className="form-group">
-          <label style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', display: 'block' }}>New Pipeline Name</label>
-          <input 
-            className="orch-input" 
-            placeholder="Enter Name" 
-            value={pipelineName}
-            onChange={(e) => setPipelineName(e.target.value)}
+            readOnly
+            style={{ opacity: 0.8, cursor: 'not-allowed' }}
           />
         </div>
 
@@ -91,7 +92,7 @@ export default function FabricDeploy({ token, call, toast, onDeploySuccess }) {
         <button 
           className="orch-btn primary" 
           onClick={handleDeploy}
-          disabled={deploying || !file}
+          disabled={deploying || !file || !workspaceId}
           style={{ marginTop: '10px' }}
         >
           {deploying ? 'Deploying...' : 'Start Deployment'}

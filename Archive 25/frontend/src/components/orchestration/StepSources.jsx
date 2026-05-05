@@ -45,6 +45,7 @@ export default function StepSources({
   const [savingGeneratedConfig, setSavingGeneratedConfig] = useState(false);
   const [saveGeneratedError, setSaveGeneratedError] = useState("");
   const [fabricToken, setFabricToken] = useState(null);
+  const [selectedFabricWorkspace, setSelectedFabricWorkspace] = useState(null);
   const [fabricTab, setFabricTab] = useState('discovery'); // 'discovery' | 'deploy'
 
   useEffect(() => {
@@ -1140,6 +1141,8 @@ export default function StepSources({
                     token={fabricToken} 
                     call={call} 
                     toast={toast} 
+                    selectedWorkspace={selectedFabricWorkspace}
+                    setSelectedWorkspace={setSelectedFabricWorkspace}
                     onPipelineSelected={(data) => {
                        setExtractedFabricData(data);
                        onNext();
@@ -1150,6 +1153,7 @@ export default function StepSources({
                     token={fabricToken} 
                     call={call} 
                     toast={toast} 
+                    selectedWorkspace={selectedFabricWorkspace}
                   />
                 )}
               </div>
