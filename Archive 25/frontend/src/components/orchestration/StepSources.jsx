@@ -1,14 +1,8 @@
-import {
-  FiCheck,
-  FiZap,
-  FiFolder,
-  FiFile,
-  FiChevronRight,
-  FiLink,
-  FiBox,
-  FiCloud,
-} from "react-icons/fi";
+import { FiSearch, FiFolder, FiFileText, FiLink, FiCloud, FiBox, FiUploadCloud, FiActivity, FiZap, FiCheck, FiSettings, FiMenu, FiCpu, FiKey, FiGlobe, FiFile, FiChevronRight } from 'react-icons/fi';
 import { useState, useEffect, useMemo } from "react";
+import FabricWorkspace from './FabricWorkspace';
+import FabricDiscovery from './FabricDiscovery';
+import FabricDeploy from './FabricDeploy';
 import { motion } from "framer-motion";
 import FluentSelect from "../FluentSelect";
 import logo from "../../assets/images/image.png";
@@ -38,6 +32,8 @@ export default function StepSources({
   setSelectedSources,
   toast,
   onManualSourceSelected,
+  extractedFabricData,
+  setExtractedFabricData,
 }) {
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
@@ -48,6 +44,8 @@ export default function StepSources({
   const [apiEndpointDraft, setApiEndpointDraft] = useState("");
   const [savingGeneratedConfig, setSavingGeneratedConfig] = useState(false);
   const [saveGeneratedError, setSaveGeneratedError] = useState("");
+  const [fabricToken, setFabricToken] = useState(null);
+  const [fabricTab, setFabricTab] = useState('discovery'); // 'discovery' | 'deploy'
 
   useEffect(() => {
     if (selectedClient) {
@@ -73,7 +71,8 @@ export default function StepSources({
     ...apiEndpoints.map((endpoint) => ({ type: "API", endpoint })),
     ...(selectedS3Path ? [{ type: "S3", path: selectedS3Path }] : []),
     ...(selectedADLSPath ? [{ type: "ADLS", path: selectedADLSPath }] : []),
-  ], [selectedLocalFiles, localFiles, apiEndpoints, selectedS3Path, selectedADLSPath]);
+    ...(extractedFabricData ? [{ type: "FABRIC", data: extractedFabricData }] : []),
+  ], [selectedLocalFiles, localFiles, apiEndpoints, selectedS3Path, selectedADLSPath, extractedFabricData]);
   const canContinue = selectedSources.length > 0;
 
   useEffect(() => {
@@ -108,6 +107,12 @@ export default function StepSources({
       setFolderPath(primary.path);
       setSelectedEndpoint(primary.path);
       setSelectedApiSource("adls-path");
+    } else if (primary.type === "FABRIC") {
+      setSourceType("FABRIC");
+      const name = primary.data?.manifest_json?.name || "Fabric Pipeline";
+      setFolderPath(name);
+      setSelectedEndpoint(name);
+      setSelectedApiSource("fabric-extracted");
     }
   }, [selectedSources, setSelectedSources, setSourceType, setFolderPath, setSelectedEndpoint, setSelectedApiSource]);
 
@@ -155,6 +160,7 @@ export default function StepSources({
   const sourceTabs = useMemo(() => [
     { id: "LOCAL", label: "Local Files", icon: <FiFolder />, color: "#10b981" },
     { id: "API", label: "REST API", icon: <FiLink />, color: "#3b82f6" },
+    { id: "FABRIC", label: "Microsoft Fabric", icon: <FiZap />, color: "#6366f1" },
     ...(s3Sources.length > 0 ? [{ id: "S3", label: "AWS S3", icon: <FiBox />, color: "#f59e0b" }] : []),
     ...(adlsSources.length > 0 ? [{ id: "ADLS", label: "Azure ADLS", icon: <FiCloud />, color: "#0078d4" }] : []),
   ], [s3Sources.length, adlsSources.length]);
@@ -941,7 +947,6 @@ export default function StepSources({
             </div>
           )}
 
-          {/* AWS S3 Tab (Placeholder) */}
           {/* AWS S3 Tab */}
           {activeTab === "S3" && (
             <div className="source-section animate-in">
@@ -1101,6 +1106,56 @@ export default function StepSources({
               </div>
             </div>
           )}
+
+          {/* Microsoft Fabric Tab */}
+          {activeTab === 'FABRIC' && (
+          <div className="fabric-integration-wrapper" style={{ marginTop: '20px' }}>
+            {!fabricToken ? (
+              <FabricWorkspace 
+                call={call} 
+                toast={toast} 
+                onConnected={(token) => setFabricToken(token)} 
+              />
+            ) : (
+              <div className="fabric-connected-view">
+                <div className="fabric-sub-tabs" style={{ display: 'flex', gap: '20px', marginBottom: '24px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '12px' }}>
+                  <button 
+                    className={`fabric-sub-tab ${fabricTab === 'discovery' ? 'active' : ''}`} 
+                    onClick={() => setFabricTab('discovery')}
+                    style={{ background: 'none', border: 'none', color: fabricTab === 'discovery' ? '#6366f1' : 'var(--text3)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                  >
+                    <FiSearch /> Discovery
+                  </button>
+                  <button 
+                    className={`fabric-sub-tab ${fabricTab === 'deploy' ? 'active' : ''}`} 
+                    onClick={() => setFabricTab('deploy')}
+                    style={{ background: 'none', border: 'none', color: fabricTab === 'deploy' ? '#6366f1' : 'var(--text3)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                  >
+                    <FiUploadCloud /> Deploy ZIP
+                  </button>
+                </div>
+
+                {fabricTab === 'discovery' ? (
+                  <FabricDiscovery 
+                    token={fabricToken} 
+                    call={call} 
+                    toast={toast} 
+                    onPipelineSelected={(data) => {
+                       setExtractedFabricData(data);
+                       onNext();
+                    }}
+                  />
+                ) : (
+                  <FabricDeploy 
+                    token={fabricToken} 
+                    call={call} 
+                    toast={toast} 
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )}
         </div>
 
         {/* Continue */}

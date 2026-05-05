@@ -1,0 +1,38 @@
+import httpx
+import os
+from fastapi import HTTPException
+
+FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
+
+class FabricAuthService:
+    def __init__(self, tenant_id=None, client_id=None, client_secret=None):
+        self.tenant_id = tenant_id or os.getenv("AZURE_TENANT_ID")
+        self.client_id = client_id or os.getenv("AZURE_CLIENT_ID")
+        self.client_secret = client_secret or os.getenv("AZURE_CLIENT_SECRET")
+
+    async def get_client_token(self):
+        """Get token using Client Credentials Flow"""
+        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "client_credentials",
+            "scope": "https://api.fabric.microsoft.com/.default"
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, data=data)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail=f"Failed to get token: {resp.text}")
+            return resp.json().get("access_token")
+
+    def get_auth_url(self, redirect_uri):
+        """Get URL for Interactive SSO login"""
+        scope = "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All https://api.fabric.microsoft.com/Item.ReadWrite.All offline_access"
+        return (
+            f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/authorize"
+            f"?client_id={self.client_id}"
+            f"&response_type=code"
+            f"&redirect_uri={redirect_uri}"
+            f"&response_mode=query"
+            f"&scope={scope}"
+        )

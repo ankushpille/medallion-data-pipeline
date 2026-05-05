@@ -75,13 +75,15 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [configPersisted, setConfigPersisted] = useState(false);
   const [clientSourceTypes, setClientSourceTypes] = useState([]);
   const [selectedSources, setSelectedSources] = useState([]);
+  const [extractedFabricData, setExtractedFabricData] = useState(null);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
     client_name: '', source_name: '', source_type: 'API', base_url: '', auth_type: 'none',
     auth_token: '', api_key_header: 'X-Api-Key', endpoints: '',
     aws_access_key_id: '', aws_secret_access_key: '', region: '', bucket_name: '',
-    azure_account_name: '', azure_account_key: '', azure_container_name: ''
+    azure_account_name: '', azure_account_key: '', azure_container_name: '',
+    fabricMode: 'discover'
   });
   const [savingSource, setSavingSource] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
@@ -872,6 +874,11 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                       setClientSourceTypes(['LOCAL']);
                       resetSessionState({ clearSourceSelection: true });
                     }
+                    if (sourceForm.source_type === 'FABRIC') {
+                      setSourceType('FABRIC');
+                      setClientSourceTypes(['FABRIC']);
+                      // Intelligence will use sourceForm.fabricDiscoveryData.pipeline_json
+                    }
                     setStep(2);
                   }}
                   call={call}
@@ -885,6 +892,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   connectionVerified={connectionVerified}
                   setConnectionVerified={setConnectionVerified}
                   testResult={testResult}
+                  extractedFabricData={extractedFabricData}
+                  setExtractedFabricData={setExtractedFabricData}
                 />
               )}
               {step === 2 && (
@@ -894,6 +903,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   clientSourceTypes={clientSourceTypes}
                   currentSourceType={sourceType}
                   apiSources={apiSources}
+                  fabricDiscoveryData={sourceForm.fabricDiscoveryData} // Pass the discovered data
                   onScanComplete={(data) => {
                     setIntelligenceData(data);
                     setConfigPersisted(false);
@@ -948,6 +958,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   toast={toast}
                   onManualSourceSelected={() => resetSessionState({ clearSourceSelection: false })}
                   onNext={() => { setStep(4); }}
+                  extractedFabricData={extractedFabricData}
+                  setExtractedFabricData={setExtractedFabricData}
                 />
               )}
               {step === 4 && (
