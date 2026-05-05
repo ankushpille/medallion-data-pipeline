@@ -76,6 +76,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [clientSourceTypes, setClientSourceTypes] = useState([]);
   const [selectedSources, setSelectedSources] = useState([]);
   const [extractedFabricData, setExtractedFabricData] = useState(null);
+  const [pipelineDeployed, setPipelineDeployed] = useState(false);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
@@ -904,6 +905,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   currentSourceType={sourceType}
                   apiSources={apiSources}
                   fabricDiscoveryData={sourceForm.fabricDiscoveryData} // Pass the discovered data
+                  fabricMode={sourceForm.fabricMode}
                   onScanComplete={(data) => {
                     setIntelligenceData(data);
                     setConfigPersisted(false);
@@ -941,6 +943,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   apiSourcesLoading={apiSourcesLoading}
                   selectedApiSource={selectedApiSource}
                   setSelectedApiSource={setSelectedApiSource}
+                  onDeploySuccess={() => setPipelineDeployed(true)}
                   selectedEndpoint={selectedEndpoint}
                   setSelectedEndpoint={setSelectedEndpoint}
                   sourceType={sourceType}
@@ -960,6 +963,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   onNext={() => { setStep(4); }}
                   extractedFabricData={extractedFabricData}
                   setExtractedFabricData={setExtractedFabricData}
+                  fabricMode={sourceForm.fabricMode}
+                  setPipelineDeployed={setPipelineDeployed}
                 />
               )}
               {step === 4 && (
@@ -972,6 +977,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   onNext={() => { fetchDatasets(); setStep(5); }}
                   syncMasterConfig={syncMasterConfig}
                   intelligenceData={intelligenceData}
+                  fabricMode={sourceForm.fabricMode}
+                  setConfigPersisted={setConfigPersisted}
                 />
               )}
               {step === 5 && (
@@ -1021,6 +1028,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   onBack={() => setStep(5)}
                   onConfirm={runOrchestration}
                   isOrchestrating={isOrchestrating}
+                  fabricMode={sourceForm.fabricMode}
+                  pipelineDeployed={pipelineDeployed}
                 />
               )}
               {step === 7 && (

@@ -34,6 +34,8 @@ export default function StepSources({
   onManualSourceSelected,
   extractedFabricData,
   setExtractedFabricData,
+  fabricMode = 'DISCOVERY',
+  setPipelineDeployed,
 }) {
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
@@ -74,7 +76,9 @@ export default function StepSources({
     ...(selectedADLSPath ? [{ type: "ADLS", path: selectedADLSPath }] : []),
     ...(extractedFabricData ? [{ type: "FABRIC", data: extractedFabricData }] : []),
   ], [selectedLocalFiles, localFiles, apiEndpoints, selectedS3Path, selectedADLSPath, extractedFabricData]);
-  const canContinue = selectedSources.length > 0;
+  
+  const isFabricDeploy = fabricMode === 'DEPLOY';
+  const canContinue = selectedSources.length > 0 || isFabricDeploy;
 
   useEffect(() => {
     setSelectedSources?.(selectedSources);
@@ -1111,7 +1115,7 @@ export default function StepSources({
           {/* Microsoft Fabric Tab */}
           {activeTab === 'FABRIC' && (
           <div className="fabric-integration-wrapper" style={{ marginTop: '20px' }}>
-            {!fabricToken ? (
+            {fabricMode !== 'DEPLOY' && !fabricToken ? (
               <FabricWorkspace 
                 call={call} 
                 toast={toast} 
@@ -1119,42 +1123,77 @@ export default function StepSources({
               />
             ) : (
               <div className="fabric-connected-view">
-                <div className="fabric-sub-tabs" style={{ display: 'flex', gap: '20px', marginBottom: '24px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '12px' }}>
-                  <button 
-                    className={`fabric-sub-tab ${fabricTab === 'discovery' ? 'active' : ''}`} 
-                    onClick={() => setFabricTab('discovery')}
-                    style={{ background: 'none', border: 'none', color: fabricTab === 'discovery' ? '#6366f1' : 'var(--text3)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
-                  >
-                    <FiSearch /> Discovery
-                  </button>
-                  <button 
-                    className={`fabric-sub-tab ${fabricTab === 'deploy' ? 'active' : ''}`} 
-                    onClick={() => setFabricTab('deploy')}
-                    style={{ background: 'none', border: 'none', color: fabricTab === 'deploy' ? '#6366f1' : 'var(--text3)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
-                  >
-                    <FiUploadCloud /> Deploy ZIP
-                  </button>
-                </div>
-
-                {fabricTab === 'discovery' ? (
-                  <FabricDiscovery 
-                    token={fabricToken} 
-                    call={call} 
-                    toast={toast} 
-                    selectedWorkspace={selectedFabricWorkspace}
-                    setSelectedWorkspace={setSelectedFabricWorkspace}
-                    onPipelineSelected={(data) => {
-                       setExtractedFabricData(data);
-                       onNext();
-                    }}
-                  />
+                {fabricMode === 'DEPLOY' ? (
+                  <div className="fabric-deploy-summary" style={{ padding: '24px', background: 'rgba(16, 185, 129, 0.05)', borderRadius: '20px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: '16px' }}>
+                      <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#10b981', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <FiCheck size={24} />
+                      </div>
+                      <div>
+                        <h4 style={{ margin: 0 }}>Pipeline Deployed Successfully</h4>
+                        <div style={{ fontSize: '13px', opacity: 0.7 }}>Ready for Medallion configuration</div>
+                      </div>
+                    </div>
+                    
+                    <div className="pi-card" style={{ background: '#fff', border: '1px solid rgba(0,0,0,0.05)' }}>
+                      <div className="pi-card-title">Deployed Asset</div>
+                      <div className="pi-kv-grid">
+                        <div><strong>Name:</strong> {intelligenceData?.reformatted_config?.pipeline_name || "Fabric Pipeline"}</div>
+                        <div><strong>Workspace:</strong> {intelligenceData?.reformatted_config?.target_workspace_id || "Target Workspace"}</div>
+                        <div><strong>Status:</strong> <span style={{ color: '#10b981', fontWeight: 700 }}>LIVE</span></div>
+                      </div>
+                    </div>
+                    {isFabricDeploy && (
+                      <div style={{ marginTop: '16px', padding: '12px', background: 'rgba(59, 130, 246, 0.05)', borderRadius: '12px', border: '1px solid rgba(59, 130, 246, 0.1)', color: '#3b82f6', fontSize: '13px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <FiSettings /> Sources are automatically derived from deployed Fabric pipeline.
+                      </div>
+                    )}
+                  </div>
                 ) : (
-                  <FabricDeploy 
-                    token={fabricToken} 
-                    call={call} 
-                    toast={toast} 
-                    selectedWorkspace={selectedFabricWorkspace}
-                  />
+                  <>
+                    <div className="fabric-sub-tabs" style={{ display: 'flex', gap: '20px', marginBottom: '24px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '12px' }}>
+                      <button 
+                        className={`fabric-sub-tab ${fabricTab === 'discovery' ? 'active' : ''}`} 
+                        onClick={() => setFabricTab('discovery')}
+                        style={{ background: 'none', border: 'none', color: fabricTab === 'discovery' ? '#6366f1' : 'var(--text3)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                      >
+                        <FiSearch /> Discovery
+                      </button>
+                      <button 
+                        className={`fabric-sub-tab ${fabricTab === 'deploy' ? 'active' : ''}`} 
+                        onClick={() => setFabricTab('deploy')}
+                        style={{ background: 'none', border: 'none', color: fabricTab === 'deploy' ? '#6366f1' : 'var(--text3)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                      >
+                        <FiUploadCloud /> Deploy ZIP
+                      </button>
+                    </div>
+
+                    {fabricTab === 'discovery' ? (
+                      <FabricDiscovery 
+                        token={fabricToken} 
+                        call={call} 
+                        toast={toast} 
+                        selectedWorkspace={selectedFabricWorkspace}
+                        setSelectedWorkspace={setSelectedFabricWorkspace}
+                        onPipelineSelected={(data) => {
+                          setExtractedFabricData(data);
+                          onNext();
+                        }}
+                      />
+                    ) : (
+                      <FabricDeploy 
+                        token={fabricToken} 
+                        call={call} 
+                        toast={toast} 
+                        selectedWorkspace={selectedFabricWorkspace}
+                        onDeploySuccess={(data) => {
+                          setExtractedFabricData(data);
+                          setPipelineDeployed?.(true);
+                          toast('Pipeline deployed and captured!', 'success');
+                        }}
+                      />
+                    )}
+                  </>
                 )}
               </div>
             )}

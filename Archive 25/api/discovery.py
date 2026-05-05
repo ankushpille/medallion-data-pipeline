@@ -28,6 +28,7 @@ class AnalyzeRequest(BaseModel):
     scan_mode: str = "live"
     providers: Optional[str] = None
     source_type: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
 
 
 class ApiScanRequest(BaseModel):
@@ -191,6 +192,7 @@ async def run_discovery_analyze(request: AnalyzeRequest, http_request: Request):
             use_local_llm=request.use_local_llm,
             scan_mode=request.scan_mode,
             authorization_token=bearer_token,
+            payload=request.payload,
         )
         return result
     except HTTPException:

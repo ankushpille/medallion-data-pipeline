@@ -275,5 +275,7 @@ async def deploy_pipeline_execute(
             "pipeline_deployed": final_name,
             "status": "SUCCESS",
             "remapped_ids": len(id_mappings),
-            "fabric_response": create_resp.json()
+            "fabric_response": create_resp.json(),
+            "pipeline_json": final_definition,
+            "manifest_json": parsed.get("manifest", {})
         }

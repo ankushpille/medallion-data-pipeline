@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import logo from '../../assets/images/image.png';
 
 export default function StepConfig({
-  selectedClient, folderPath, sourceType, call, toast, onNext, syncMasterConfig, intelligenceData
+  selectedClient, folderPath, sourceType, call, toast, onNext, syncMasterConfig, intelligenceData, fabricMode = 'DISCOVERY', setConfigPersisted
 }) {
   const navigate = useNavigate();
   const [configData, setConfigData] = useState([]);
@@ -63,14 +63,48 @@ export default function StepConfig({
 
   async function saveConfig() {
     setSaving(true);
+    
+    // Prepare payload
+    let payload = {
+      client_name: selectedClient || "fabric_client",
+      config: configData
+    };
+
+    if (fabricMode === "DEPLOY" && configData.length === 0 && intelligenceData?.reformatted_config) {
+        // Construct a single config row from intelligence data if table is empty
+        const extractedJson = intelligenceData.reformatted_config;
+        const autoRow = {
+            dataset_id: extractedJson.dataset_id || `fabric_${Date.now()}`,
+            client_name: selectedClient || "fabric_client",
+            source_type: "FABRIC",
+            source_folder: extractedJson.source_path || "fabric://pipeline",
+            source_object: extractedJson.pipeline_name || extractedJson.name || "FabricPipeline",
+            file_format: (extractedJson.file_types && extractedJson.file_types[0]) || "JSON",
+            is_active: true,
+            load_type: "full",
+        };
+        payload.config = [autoRow];
+    }
+
+    // Fix 2: Prevent EMPTY VALUES
+    if (!payload.client_name || !payload.config || payload.config.length === 0) {
+        console.error("Invalid payload:", payload);
+        toast('Configuration data is empty. Please sync or edit before saving.', 'warning');
+        setSaving(false);
+        return;
+    }
+
     try {
-      await call('/orchestrate/master-config/update', 'POST', {
-        client_name: selectedClient,
-        config: configData
-      });
-      toast('Configuration saved successfully', 'success');
+      const res = await call('/orchestrate/master-config/update', 'POST', payload);
+      if (res && res.status === 'SUCCESS') {
+          toast('Configuration saved successfully', 'success');
+          setConfigPersisted?.(true);
+      } else {
+          throw new Error('Save failed');
+      }
     } catch (e) {
       toast('Failed to save configuration', 'error');
+      setConfigPersisted?.(false);
     } finally {
       setSaving(false);
     }
@@ -238,7 +272,7 @@ export default function StepConfig({
           <button
             className="orch-btn ghost"
             onClick={saveConfig}
-            disabled={saving || loading || configData.length === 0}
+            disabled={saving || loading || !(configData.length > 0 || (fabricMode === 'DEPLOY' && !!intelligenceData?.reformatted_config))}
           >
             <FiSave style={{ marginRight: 6 }} /> {saving ? 'Saving...' : 'Save Config'}
           </button>

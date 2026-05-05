@@ -14,7 +14,7 @@ const itemVariants = {
   animate: { opacity: 1, y: 0 }
 };
 
-export default function StepClient({ clients, clientLoading, selectedClient, setSelectedClient, fetchClients, onNext, call, toast, sourceForm, setSourceForm, registerSource, savingSource, testConnection, testingConnection, connectionVerified, setConnectionVerified, testResult, extractedFabricData, setExtractedFabricData }) {
+export default function StepClient({ clients, clientLoading, selectedClient, setSelectedClient, fetchClients, onNext, call, toast, sourceForm, setSourceForm, registerSource, savingSource, testConnection, testingConnection, connectionVerified, setConnectionVerified, testResult, extractedFabricData, setExtractedFabricData, onDeploySuccess }) {
   const navigate = useNavigate();
   const [tab, setTab] = useState('existing'); // 'existing' | 'register'
   const [searchQuery, setSearchQuery] = useState('');
@@ -44,7 +44,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
       await call(`/config/clients/${clientToDelete}`, 'DELETE');
       toast(`Successfully deleted client "${clientToDelete}"`, 'success');
       if (selectedClient === clientToDelete) {
-         setSelectedClient(null);
+        setSelectedClient(null);
       }
       setShowDeleteConfirm(false);
       setClientToDelete(null);
@@ -67,7 +67,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
           <h2 className="step-title" style={{ margin: 0, fontSize: 24, fontWeight: 900, background: 'linear-gradient(90deg, var(--text1), var(--text2))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>DEA Agent — Client Setup</h2>
           <p className="step-sub" style={{ margin: '4px 0 0', opacity: 0.8, fontSize: 13, fontWeight: 500 }}>Register a new client or choose an existing one to begin.</p>
         </div>
-        
+
         <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
           {/* Moved Tab Toggle to Top Right */}
           <div className="step-tabs" style={{ margin: 0, scale: 0.9 }}>
@@ -86,7 +86,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
               <FiPlus style={{ marginRight: 6 }} /> Register New
             </button>
           </div>
-          
+
           <div className="header-logo-divider" style={{ width: 1, height: 24, background: 'rgba(0,0,0,0.1)' }} />
           <img src={logo} alt="Agilisium" style={{ height: 28, objectFit: 'contain' }} />
         </div>
@@ -107,7 +107,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 style={{ width: '100%', paddingLeft: 40 }}
               />
             </div>
-            
+
             <button className="orch-btn ghost tiny" onClick={fetchClients} title="Refresh Client List">
               <FiRefreshCw />
             </button>
@@ -130,7 +130,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 <p>{searchQuery ? `No clients matching "${searchQuery}"` : 'No clients found. Register one first.'}</p>
               </div>
             ) : (
-              filteredClients.map(c => (
+              filteredClients.map((c) => (
                 <motion.div
                   key={c}
                   variants={itemVariants}
@@ -150,8 +150,8 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                   </div>
                   <div className="client-marker" style={{ position: 'absolute', right: 12, top: 12 }}>
                     <div className="client-card-actions">
-                      <button 
-                        className="delete-client-btn" 
+                      <button
+                        className="delete-client-btn"
                         onClick={(e) => deleteClient(e, c)}
                         title="Delete Client"
                       >
@@ -177,11 +177,11 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.98, y: 10 }}
                 className="step-footer-actions-container"
-                style={{ 
-                  display: 'flex', 
-                  justifyContent: 'flex-end', 
+                style={{
+                  display: 'flex',
+                  justifyContent: 'flex-end',
                   alignItems: 'center',
-                  gap: 12, 
+                  gap: 12,
                   marginTop: 32,
                   padding: '20px',
                   background: 'rgba(255, 255, 255, 0.4)',
@@ -191,11 +191,11 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                   boxShadow: '0 8px 32px rgba(0,0,0,0.04)'
                 }}
               >
-                <button 
-                  className="orch-btn primary premium-btn" 
-                  onClick={onNext} 
-                  style={{ 
-                    height: 48, 
+                <button
+                  className="orch-btn primary premium-btn"
+                  onClick={onNext}
+                  style={{
+                    height: 48,
                     padding: '0 32px',
                     fontSize: '15px'
                   }}
@@ -226,8 +226,8 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                     whileHover={{ y: -4, scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                     onClick={() => {
-                        setSourceForm({ ...sourceForm, source_type: t.id });
-                        setConnectionVerified(false);
+                      setSourceForm({ ...sourceForm, source_type: t.id });
+                      setConnectionVerified(false);
                     }}
                     className={`source-type-card ${(sourceForm.source_type || 'API') === t.id ? 'active' : ''}`}
                     style={{
@@ -245,7 +245,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                       <div className="source-type-desc">{t.desc}</div>
                     </div>
                     {(sourceForm.source_type || 'API') === t.id && (
-                      <motion.div 
+                      <motion.div
                         layoutId="active-glow"
                         className="source-card-glow"
                         initial={false}
@@ -458,55 +458,65 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 {sourceForm.source_type === 'FABRIC' && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fabric-virtual-setup" style={{ gridColumn: 'span 2', marginTop: '20px' }}>
                     {!sourceForm.fabricToken ? (
-                      <FabricWorkspace 
-                        call={call} 
-                        toast={toast} 
-                        onConnected={(token) => setSourceForm({ ...sourceForm, fabricToken: token })} 
+                      <FabricWorkspace
+                        call={call}
+                        toast={toast}
+                        onConnected={(token) => setSourceForm({ ...sourceForm, fabricToken: token })}
                       />
                     ) : (
                       <div className="fabric-setup-container" style={{ padding: '24px', background: 'rgba(255,255,255,0.03)', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.05)' }}>
                         <div className="fabric-setup-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                           <div style={{ fontWeight: 800 }}>Fabric Configuration</div>
-                           <div className="mode-tabs" style={{ display: 'flex', gap: '8px' }}>
-                             <button 
-                                className={`orch-btn tiny ${sourceForm.fabricMode === 'discover' ? 'primary' : 'ghost'}`}
-                                onClick={() => setSourceForm({ ...sourceForm, fabricMode: 'discover' })}
-                             >
-                               <FiSearch style={{ marginRight: '6px' }} /> Discover
-                             </button>
-                             <button 
-                                className={`orch-btn tiny ${sourceForm.fabricMode === 'deploy' ? 'primary' : 'ghost'}`}
-                                onClick={() => setSourceForm({ ...sourceForm, fabricMode: 'deploy' })}
-                             >
-                               <FiUploadCloud style={{ marginRight: '6px' }} /> Deploy
-                             </button>
-                           </div>
+                          <div style={{ fontWeight: 800 }}>Fabric Configuration</div>
+                          <div className="mode-tabs" style={{ display: 'flex', gap: '8px' }}>
+                            <button
+                              className={`orch-btn tiny ${sourceForm.fabricMode === 'discover' ? 'primary' : 'ghost'}`}
+                              onClick={() => setSourceForm({ ...sourceForm, fabricMode: 'discover' })}
+                            >
+                              <FiSearch style={{ marginRight: '6px' }} /> Discover
+                            </button>
+                            <button
+                              className={`orch-btn tiny ${sourceForm.fabricMode === 'deploy' ? 'primary' : 'ghost'}`}
+                              onClick={() => setSourceForm({ ...sourceForm, fabricMode: 'deploy' })}
+                            >
+                              <FiUploadCloud style={{ marginRight: '6px' }} /> Deploy
+                            </button>
+                          </div>
                         </div>
 
                         {sourceForm.fabricMode === 'discover' ? (
-                          <FabricDiscovery 
-                            token={sourceForm.fabricToken} 
-                            call={call} 
-                            toast={toast} 
+                          <FabricDiscovery
+                            token={sourceForm.fabricToken}
+                            call={call}
+                            toast={toast}
                             selectedWorkspace={fabricWorkspace}
                             setSelectedWorkspace={setFabricWorkspace}
                             onPipelineSelected={(data) => {
-                               setSourceForm({ ...sourceForm, fabricDiscoveryData: data });
-                               toast('Pipeline discovery complete!', 'success');
+                              setSourceForm({
+                                ...sourceForm,
+                                fabricMode: 'DISCOVERY',
+                                fabricDiscoveryData: data
+                              });
+                              toast('Pipeline discovery complete!', 'success');
                             }}
                           />
                         ) : (
-                          <FabricDeploy 
-                            token={sourceForm.fabricToken} 
-                            call={call} 
-                            toast={toast} 
+                          <FabricDeploy
+                            token={sourceForm.fabricToken}
+                            call={call}
+                            toast={toast}
                             selectedWorkspace={fabricWorkspace}
                             onDeploySuccess={(data) => {
-                               setSourceForm({ ...sourceForm, fabricDiscoveryData: data });
-                               toast('Pipeline deployed and captured!', 'success');
+                              setSourceForm({
+                                ...sourceForm,
+                                fabricMode: 'DEPLOY',
+                                fabricDiscoveryData: data
+                              });
+                              onDeploySuccess?.();
+                              toast('Pipeline deployed and captured!', 'success');
                             }}
                           />
                         )}
+
                       </div>
                     )}
                   </motion.div>
@@ -526,10 +536,10 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
             </div>
 
             {testResult && (
-              <div style={{ 
-                marginTop: 12, 
-                padding: '14px 20px', 
-                borderRadius: 14, 
+              <div style={{
+                marginTop: 12,
+                padding: '14px 20px',
+                borderRadius: 14,
                 fontSize: 13,
                 fontWeight: 600,
                 border: '1px solid',
@@ -556,7 +566,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                   {testingConnection ? 'Testing...' : '⚡ Test Connection'}
                 </button>
               )}
-              
+
               {sourceForm.source_type === 'FABRIC' ? (
                 <button
                   className={`orch-btn primary premium-btn ${(sourceForm.fabricDiscoveryData || sourceForm.fabricMode === 'deploy') ? '' : 'disabled-btn'}`}
@@ -591,9 +601,9 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                   disabled={savingSource || !sourceForm.client_name || (sourceForm.source_type !== 'LOCAL' && (!sourceForm.source_name || (!connectionVerified && !apiCanSkipConnection)))}
                   style={{ flex: sourceForm.source_type !== 'LOCAL' ? 1.5 : 1 }}
                 >
-                  {savingSource ? 'Registering...' : 
-                    sourceForm.source_type === 'LOCAL' ? 'Continue to Upload →' : 
-                    `🚀 Register ${sourceForm.source_type || 'API'} Source`}
+                  {savingSource ? 'Registering...' :
+                    sourceForm.source_type === 'LOCAL' ? 'Continue to Upload →' :
+                      `🚀 Register ${sourceForm.source_type || 'API'} Source`}
                 </button>
               )}
             </div>
@@ -618,15 +628,15 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 </div>
                 <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>Confirm Deletion</h3>
               </div>
-              <button 
-                className="orch-btn ghost tiny" 
+              <button
+                className="orch-btn ghost tiny"
                 onClick={() => setShowDeleteConfirm(false)}
                 style={{ borderRadius: '50%', width: 32, height: 32, padding: 0 }}
               >
                 <FiX />
               </button>
             </div>
-            
+
             <div className="confirmation-body" style={{ padding: '24px 32px' }}>
               <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--text1)' }}>Are you sure you want to delete client <strong>"{clientToDelete}"</strong>?</p>
               <p style={{ marginTop: 12, fontSize: 13, color: 'var(--text3)', lineHeight: 1.6 }}>
@@ -635,14 +645,14 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
             </div>
 
             <div className="confirmation-footer" style={{ padding: '20px 32px', background: 'var(--surface2)', display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-              <button 
-                className="orch-btn ghost" 
+              <button
+                className="orch-btn ghost"
                 onClick={() => setShowDeleteConfirm(false)}
               >
                 Cancel
               </button>
-              <button 
-                className="orch-btn primary" 
+              <button
+                className="orch-btn primary"
                 onClick={handleConfirmDelete}
                 style={{ background: '#ef4444', color: '#fff', border: 'none', fontWeight: 800 }}
               >

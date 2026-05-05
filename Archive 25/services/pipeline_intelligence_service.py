@@ -537,6 +537,7 @@ async def analyze_pipeline_live(
     use_local_llm: bool = False,
     scan_mode: str = "live",
     authorization_token: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
 ):
     """
     Runs live cloud scan and extracts DEA capabilities.
@@ -594,7 +595,13 @@ async def analyze_pipeline_live(
     raw_cloud_scan = live_data or {}
     extracted_original_config: Dict[str, Any] = {}
     if target_key == "fabric":
-        extracted_original_config = _fabric_original_config_from_scan(raw_cloud_scan)
+        if payload:
+            extracted_original_config = payload
+            scan_status = "success"
+            is_fallback = False
+        else:
+            extracted_original_config = _fabric_original_config_from_scan(raw_cloud_scan)
+        
         if not extracted_original_config:
             warnings.append("Pipeline definition could not be extracted from Fabric API")
             if scan_status == "success":

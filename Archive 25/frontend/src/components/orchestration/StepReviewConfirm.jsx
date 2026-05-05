@@ -29,6 +29,8 @@ export default function StepReviewConfirm({
   onBack,
   onConfirm,
   isOrchestrating,
+  fabricMode = 'DISCOVERY',
+  pipelineDeployed = false,
 }) {
   const executionPayload = {
     endpoint: '/orchestrate/run',
@@ -49,13 +51,16 @@ export default function StepReviewConfirm({
         }
       : null,
   };
+  const isFabricDeploy = fabricMode === 'DEPLOY';
+  const isFabricReady = isFabricDeploy && !!configPersisted;
+  
   const realScanReady = !!intelligenceData
-    && !intelligenceData.is_fallback
+    && (isFabricDeploy || (!intelligenceData.is_fallback && intelligenceData.auth_mode !== 'none' && intelligenceData.pipeline_capabilities?.scan_mode !== 'mock'))
     && intelligenceData.scan_status !== 'failed'
-    && intelligenceData.auth_mode !== 'none'
-    && intelligenceData.pipeline_capabilities?.scan_mode !== 'mock'
     && !!configPersisted;
-  const canExecute = requiresRealScan ? realScanReady : true;
+
+  const isReady = requiresRealScan ? realScanReady : true;
+  const canExecute = isReady || isFabricReady;
 
   return (
     <motion.div
@@ -131,14 +136,14 @@ export default function StepReviewConfirm({
         <button
           className="orch-btn primary step-next-btn"
           onClick={onConfirm}
-          disabled={isOrchestrating || !selectedClient || !sourceType || !folderPath || !canExecute}
+          disabled={isOrchestrating || (!isFabricDeploy && (!selectedClient || !sourceType || !folderPath)) || !canExecute}
           style={{ minWidth: 240, fontWeight: 800 }}
         >
           <FiCheck style={{ marginRight: 8 }} />
           {isOrchestrating ? 'Pushing...' : 'Confirm & Push to DEA Agent'}
         </button>
       </div>
-      {!canExecute && (
+      {(!canExecute && !isFabricDeploy) && (
         <div className="panel-error-alert" style={{ marginTop: 12 }}>
           Please perform a real scan using credentials and save configuration before execution.
         </div>

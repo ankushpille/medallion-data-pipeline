@@ -52,7 +52,7 @@ function hasApiScanDetails(apiSources = []) {
   });
 }
 
-export default function PipelineIntelligence({ clientName, initialData, clientSourceTypes = [], currentSourceType = '', apiSources = [], fabricDiscoveryData = null, onScanComplete, onConfirm }) {
+export default function PipelineIntelligence({ clientName, initialData, clientSourceTypes = [], currentSourceType = '', apiSources = [], fabricDiscoveryData = null, fabricMode = 'DISCOVERY', onScanComplete, onConfirm }) {
   const [data, setData] = useState(initialData || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -107,7 +107,7 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
 
   useEffect(() => {
     if (currentSourceType === 'FABRIC' && fabricDiscoveryData && !data && !loading) {
-        // Automatically run analysis for discovered fabric pipeline
+        // Automatically run analysis for discovered or deployed fabric pipeline
         runFabricAnalysis();
     }
   }, [currentSourceType, fabricDiscoveryData]);
@@ -116,18 +116,22 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(apiUrl('/fabric/analyze'), {
+      const response = await fetch(apiUrl('/discovery/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
             client_name: clientName,
-            pipeline_json: fabricDiscoveryData.pipeline || fabricDiscoveryData
+            source_type: 'fabric',
+            target: 'fabric',
+            payload: fabricDiscoveryData.pipeline_json || fabricDiscoveryData.pipeline || fabricDiscoveryData,
+            use_cloud_llm: useCloudLlm
         }),
       });
       if (!response.ok) throw new Error('Fabric analysis failed');
       const result = await response.json();
-      setData(result);
-      onScanComplete?.(result);
+      const finalResult = { ...result, scan_status: 'success', scan_completed: true };
+      setData(finalResult);
+      onScanComplete?.(finalResult);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -154,6 +158,9 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
           >
             <span className="pi-target-icon">{item.icon}</span>
             <span>{item.label}</span>
+            {item.id === 'fabric' && fabricMode === 'DEPLOY' && (
+              <span className="pi-tag" style={{ marginLeft: 8, background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}>DEPLOY MODE</span>
+            )}
           </button>
         ))}
         {allowedTargets.length === 0 && (
@@ -244,15 +251,19 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
         )}
       </div>
 
-      {currentSourceType === 'FABRIC' && !fabricDiscoveryData && (
+      {currentSourceType === 'FABRIC' && !data && !loading && (
           <div className="pi-card pi-wide" style={{ marginTop: '20px' }}>
-             <div className="pi-card-title"><FiCheck color="#10b981" /> Fabric Deployment Ready</div>
+             <div className="pi-card-title"><FiCheck color="#10b981" /> {fabricMode === 'DEPLOY' ? 'Fabric Deployment Ready' : 'Fabric Connection Ready'}</div>
              <div className="pi-card-content">
-                Fabric pipeline has been deployed to the target workspace. You can now proceed to review data sources or configure the ingestion.
+                {fabricMode === 'DEPLOY' 
+                  ? 'Fabric pipeline has been deployed to the target workspace. Local analysis is being prepared.' 
+                  : 'Connected to Microsoft Fabric via SSO. You can now scan the environment or proceed manually.'}
              </div>
-             <div className="pi-actions" style={{ marginTop: '20px' }}>
-                <button className="pi-btn-confirm" onClick={() => onConfirm(null)}>Continue to Data Sources</button>
-             </div>
+             {fabricMode !== 'DEPLOY' && (
+               <div className="pi-actions" style={{ marginTop: '20px' }}>
+                  <button className="pi-btn-confirm" onClick={() => onConfirm(null)}>Continue to Data Sources</button>
+               </div>
+             )}
           </div>
       )}
 
