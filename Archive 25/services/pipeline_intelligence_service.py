@@ -709,6 +709,19 @@ async def analyze_pipeline_live(
         "supported_modes": [k for k, v in ingestion_support.items() if v],
     }
 
+    # 7. Fabric-specific discovery promotion
+    fabric_workspaces = []
+    fabric_items = []
+    if target_key == "fabric":
+        # Extract from raw_cloud_dump lists
+        for dump in raw_cloud_scan.get("raw_cloud_dump", []):
+            if isinstance(dump, dict):
+                fabric_workspaces.extend(dump.get("fabric_workspaces", []))
+                fabric_items.extend(dump.get("fabric_items", []))
+        
+        # Log final structured results for debugging
+        logger.info("FINAL SCAN RESULTS | Workspaces: %d | Items: %d", len(fabric_workspaces), len(fabric_items))
+
     result = {
         "framework": detected_framework,
         "auth_mode": resolved_auth_mode,
@@ -718,6 +731,8 @@ async def analyze_pipeline_live(
         "errors": errors,
         "discovered_assets": discovered_assets,
         "data_pipelines": data_pipelines,
+        "fabric_workspaces": fabric_workspaces,
+        "fabric_items": fabric_items,
         "source_systems": source_systems,
         "ingestion_support": ingestion_support,
         "ingestion_types": ingestion_types,

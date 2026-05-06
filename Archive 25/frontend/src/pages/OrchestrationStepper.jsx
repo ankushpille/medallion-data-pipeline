@@ -23,8 +23,8 @@ const STEPS = [
   { num: 0, label: 'Platform' },
   { num: 1, label: 'Client' },
   { num: 2, label: 'Intelligence' },
-  { num: 3, label: 'Deployment' }, // Fabric Only
-  { num: 4, label: 'Sources & Config' },
+  { num: 3, label: 'Sources & Config' },
+  { num: 4, label: 'Deployment' }, // Fabric Only
   { num: 5, label: 'DQ Rules' },
   { num: 6, label: 'Review' },
   { num: 7, label: 'Execution' },
@@ -932,60 +932,28 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   clientSourceTypes={clientSourceTypes}
                   currentSourceType={sourceType}
                   apiSources={apiSources}
-                  fabricDiscoveryData={sourceForm.fabricDiscoveryData} // Pass the discovered data
+                  fabricDiscoveryData={sourceForm.fabricDiscoveryData}
                   fabricMode={sourceForm.fabricMode}
                   selectedPlatform={selectedPlatform}
+                  selectedWorkspace={selectedWorkspace}
+                  setSelectedWorkspace={setSelectedWorkspace}
+                  selectedPipeline={selectedPipeline}
+                  setSelectedPipeline={setSelectedPipeline}
                   onScanComplete={(data) => {
                     console.log("STEPPER: Intelligence scan completed", data);
-                    setIntelligenceData(data);
-                    setConfigPersisted(false);
-                    setDatasets([]);
-                    setOrchestrateResp(null);
-                    setSelectedApiSource('intelligence-scan');
-                    
-                    const details = data?.ingestion_details || data?.reformatted_config || {};
-                    if (details.source_type) setSourceType(details.source_type);
-                    if (details.source_path) {
-                      setFolderPath(details.source_path);
-                      setSelectedEndpoint(details.source_path);
-                    }
-
-                    // Extract Fabric workspace/pipeline if present in scan
-                    if (data?.raw_cloud_scan?.fabric_workspaces?.[0]) {
-                      setSelectedWorkspace(data.raw_cloud_scan.fabric_workspaces[0]);
-                    }
-                    if (data?.data_pipelines?.[0]) {
-                      setSelectedPipeline(data.data_pipelines[0]);
-                    }
+                    // Discovered assets will be managed inside PipelineIntelligence
                   }}
                   onConfirm={(data) => {
                     if (data) {
                       setIntelligenceData(data);
                       if (data.deploymentStrategy) setDeploymentStrategy(data.deploymentStrategy);
-                      
-                      // Also update workspace/pipeline if confirm payload has them
-                      if (data.selectedWorkspace) setSelectedWorkspace(data.selectedWorkspace);
-                      if (data.selectedPipeline) setSelectedPipeline(data.selectedPipeline);
                     }
-                    if (selectedPlatform === 'FABRIC') {
-                      setStep(3);
-                    } else {
-                      setStep(4);
-                    }
+                    // Configure EVERYTHING before deployment
+                    setStep(3);
                   }}
                 />
               )}
               {step === 3 && (
-                <StepDeployment
-                  selectedWorkspace={selectedWorkspace}
-                  selectedPipeline={selectedPipeline}
-                  deploymentStrategy={deploymentStrategy}
-                  deploymentPackage={deploymentPackage}
-                  setDeploymentPackage={setDeploymentPackage}
-                  onNext={() => setStep(4)}
-                />
-              )}
-              {step === 4 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 40 }}>
                   <StepSources
                     selectedClient={selectedClient}
@@ -1030,13 +998,31 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     sourceType={sourceType}
                     call={call}
                     toast={toast}
-                    onNext={() => { fetchDatasets(); setStep(5); }}
+                    onNext={() => { 
+                      fetchDatasets(); 
+                      if (selectedPlatform === 'FABRIC') {
+                        setStep(4); // Go to Deployment
+                      } else {
+                        setStep(5); // Go to DQ Rules
+                      }
+                    }}
                     syncMasterConfig={syncMasterConfig}
                     intelligenceData={intelligenceData}
                     fabricMode={sourceForm.fabricMode}
                     setConfigPersisted={setConfigPersisted}
+                    selectedPlatform={selectedPlatform}
                   />
                 </div>
+              )}
+              {step === 4 && (
+                <StepDeployment
+                  selectedWorkspace={selectedWorkspace}
+                  selectedPipeline={selectedPipeline}
+                  deploymentStrategy={deploymentStrategy}
+                  deploymentPackage={deploymentPackage}
+                  setDeploymentPackage={setDeploymentPackage}
+                  onNext={() => setStep(5)}
+                />
               )}
               {step === 5 && (
                 <StepDQ
@@ -1072,6 +1058,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   onRunOrchestration={runOrchestration}
                   isOrchestrating={isOrchestrating}
                   datasetsLoading={datasetsLoading}
+                  onBack={() => setStep(selectedPlatform === 'FABRIC' ? 4 : 3)}
                 />
               )}
               {step === 6 && (

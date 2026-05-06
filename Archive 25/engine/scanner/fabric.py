@@ -30,65 +30,81 @@ class FabricScanner(CloudScanner):
 
             # Microsoft Fabric API Scope
             headers = {"Authorization": f"Bearer {azure_token}"}
+            logger.info("FABRIC TOKEN RESOLVED: %s...", azure_token[:10])
             
             # 2. List Workspaces
-            logger.info("Triggering Microsoft Fabric Deep Discovery...")
+            logger.info("Triggering Microsoft Fabric Deep Discovery (GET /v1/workspaces)...")
             ws_response = requests.get("https://api.fabric.microsoft.com/v1/workspaces", headers=headers, timeout=10)
+            logger.info("FABRIC WORKSPACES RAW: %s", ws_response.text[:500])
             
             if ws_response.status_code == 200:
-                # ... (rest of logic stays same)
                 workspaces = ws_response.json().get('value', [])
                 for ws in workspaces:
-                    # ... ws logic ...
                     ws_id = ws.get('id')
-                    raw_assets["fabric_workspaces"].append({
-                        "id": f"fabric || {ws.get('displayName')}",
-                        "configuration": {
-                            "WorkspaceId": ws_id,
-                            "Type": ws.get('type'),
-                            "CapacityId": ws.get('capacityId')
-                        }
-                    })
+                    ws_name = ws.get('displayName')
                     
-                    # 3. List Items in Workspace (Lakehouses, Pipelines, etc.)
+                    # Create structured workspace object for the Explorer UI
+                    workspace_obj = {
+                        "id": ws_id,
+                        "name": ws_name,
+                        "type": ws.get('type'),
+                        "pipelines": []
+                    }
+                    raw_assets["fabric_workspaces"].append(workspace_obj)
+                    
+                    # 3. List Items in Workspace (Fetch Pipelines)
+                    logger.info("Fetching items for workspace %s (%s)...", ws_name, ws_id)
                     items_res = requests.get(f"https://api.fabric.microsoft.com/v1/workspaces/{ws_id}/items", headers=headers, timeout=10)
+                    
                     if items_res.status_code == 200:
-                        items = items_res.json().get('value', [])
+                        items_data = items_res.json()
+                        logger.info("FABRIC ITEMS RAW FOR %s: %s", ws_name, items_res.text[:200])
+                        items = items_data.get('value', [])
+                        
                         for item in items:
                             item_id = item.get('id')
                             item_type = item.get('type')
-                            item_meta = {
-                                "id": f"fabric || {item.get('displayName')}",
-                                "configuration": {
-                                    "ItemId": item_id,
-                                    "Type": item_type,
-                                    "WorkspaceId": ws_id
-                                }
-                            }
+                            item_name = item.get('displayName')
                             
-                            # Deep Inspection for Lakehouses
-                            if item_type == 'Lakehouse':
+                            # Only include DataPipelines in the explorer hierarchy
+                            if str(item_type).lower() in {"pipeline", "datapipeline", "data pipeline"}:
+                                workspace_obj["pipelines"].append({
+                                    "id": item_id,
+                                    "name": item_name
+                                })
+                                
+                                # Fetch definition for the specific pipeline
+                                definition = self._fetch_item_definition(headers, ws_id, item_id, item_type)
+                                item_meta = {
+                                    "id": f"fabric || {item_name}",
+                                    "configuration": {
+                                        "ItemId": item_id,
+                                        "Type": item_type,
+                                        "WorkspaceId": ws_id,
+                                        "Definition": definition if definition else {"DefinitionFetchStatus": "unavailable"}
+                                    }
+                                }
+                                raw_assets["fabric_items"].append(item_meta)
+                            
+                            elif item_type == 'Lakehouse':
                                 try:
                                     lh_res = requests.get(f"https://api.fabric.microsoft.com/v1/workspaces/{ws_id}/lakehouses/{item_id}", headers=headers, timeout=10)
                                     if lh_res.status_code == 200:
                                         lh_props = lh_res.json().get('properties', {})
-                                        item_meta["configuration"]["OneLakeFilesPath"] = lh_props.get('oneLakeFilesPath')
-                                        item_meta["configuration"]["OneLakeTablesPath"] = lh_props.get('oneLakeTablesPath')
+                                        raw_assets["fabric_items"].append({
+                                            "id": f"fabric || {item_name}",
+                                            "configuration": {
+                                                "ItemId": item_id,
+                                                "Type": item_type,
+                                                "WorkspaceId": ws_id,
+                                                "OneLakeFilesPath": lh_props.get('oneLakeFilesPath'),
+                                                "OneLakeTablesPath": lh_props.get('oneLakeTablesPath')
+                                            }
+                                        })
                                 except Exception:
                                     pass
-                            elif str(item_type).lower() in {"pipeline", "datapipeline"}:
-                                definition = self._fetch_item_definition(headers, ws_id, item_id, item_type)
-                                if definition:
-                                    item_meta["configuration"]["Definition"] = definition
-                                else:
-                                    item_meta["configuration"]["DefinitionFetchStatus"] = "unavailable"
-                                    raw_assets["warnings"].append(
-                                        f"Pipeline definition could not be extracted from Fabric API for item {item.get('displayName') or item_id}"
-                                    )
-                                    
-                            raw_assets["fabric_items"].append(item_meta)
             elif ws_response.status_code == 401:
-                logger.error("Fabric API 401 Unauthorized. The SSO token likely lacks the required PowerBI/Fabric scope ('https://analysis.windows.net/powerbi/api/.default').")
+                logger.error("Fabric API 401 Unauthorized. The SSO token likely lacks the required PowerBI/Fabric scope.")
                 raw_assets["errors"].append("Fabric API returned 401 Unauthorized. Token may lack Fabric/Power BI scopes.")
             else:
                 logger.warning(f"Fabric API returned {ws_response.status_code}: {ws_response.text}")
