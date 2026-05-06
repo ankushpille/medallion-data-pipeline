@@ -1,23 +1,44 @@
-import { FiCheck, FiDatabase, FiFile, FiSettings, FiZap } from 'react-icons/fi';
+import { FiCheck, FiDatabase, FiFile, FiSettings, FiZap, FiCpu, FiActivity, FiArrowRight, FiCloud } from 'react-icons/fi';
 import { motion } from 'framer-motion';
 import logo from '../../assets/images/image.png';
 import '../PipelineIntelligence.css';
 
-function JsonBlock({ value }) {
+function Tag({ active, children }) {
   return (
-    <pre className="orch-pre" style={{ maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', fontSize: 12 }}>
-      {JSON.stringify(value || {}, null, 2)}
-    </pre>
+    <span
+      className={`pi-tag ${active === false ? 'inactive' : 'active'}`}
+      style={{ fontSize: 11, padding: '4px 10px', borderRadius: 8 }}
+    >
+      {children}
+    </span>
   );
 }
 
-function SummaryChip({ label, value }) {
+function SummaryChip({ label, value, color }) {
   return (
-    <div className="config-chip">
+    <div className="config-chip" style={color ? { borderColor: `${color}30`, background: `${color}08` } : {}}>
       <strong>{label}:</strong> {value || 'Not selected'}
     </div>
   );
 }
+
+function IntelCard({ icon, title, children, style }) {
+  return (
+    <div className="pi-card" style={{ background: '#fff', border: '1px solid rgba(0,0,0,0.06)', borderRadius: 16, padding: '20px 24px', ...style }}>
+      <div className="pi-card-title" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 800, marginBottom: 12, color: 'var(--text1)' }}>
+        {icon} {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const PLATFORM_META = {
+  FABRIC: { label: 'Microsoft Fabric', color: '#6366f1', icon: <FiZap /> },
+  AZURE: { label: 'Azure', color: '#0078d4', icon: <FiCloud /> },
+  AWS: { label: 'AWS', color: '#f59e0b', icon: <FiCloud /> },
+  DATABRICKS: { label: 'Databricks', color: '#ef4444', icon: <FiCpu /> },
+};
 
 export default function StepReviewConfirm({
   selectedClient,
@@ -31,10 +52,19 @@ export default function StepReviewConfirm({
   isOrchestrating,
   fabricMode = 'DISCOVERY',
   pipelineDeployed = false,
+  selectedPlatform = '',
+  deploymentStrategy = null,
+  deploymentPackage = null,
+  selectedWorkspace = null,
+  selectedPipeline = null,
 }) {
   const isFabricDeploy = fabricMode === 'DEPLOY';
   const isFabricReady = isFabricDeploy && !!configPersisted;
-  
+  const platform = PLATFORM_META[selectedPlatform] || null;
+  const support = intelligenceData?.ingestion_support || {};
+  const capabilities = intelligenceData?.pipeline_capabilities || {};
+  const flow = intelligenceData?.interactive_flow || intelligenceData?.loading_flow || [];
+
   const executionPayload = {
     endpoint: '/orchestrate/run',
     method: 'POST',
@@ -42,6 +72,11 @@ export default function StepReviewConfirm({
       source_type: isFabricDeploy ? 'FABRIC' : sourceType,
       client_name: selectedClient || localStorage.getItem('client_name') || 'fabric_client',
       folder_path: folderPath || (isFabricDeploy ? intelligenceData?.reformatted_config?.source_path : ''),
+      platform: selectedPlatform,
+      deployment_strategy: deploymentStrategy,
+      workspace_id: selectedWorkspace?.id,
+      pipeline_id: selectedPipeline?.id,
+      package_name: deploymentPackage?.name,
     },
     intelligence: intelligenceData
       ? {
@@ -80,8 +115,20 @@ export default function StepReviewConfirm({
       </div>
 
       <div className="step-body" style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-        <div className="dq-config-summary">
+        {/* Summary Chips */}
+        <div className="dq-config-summary" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {platform && <SummaryChip label="Platform" value={platform.label} color={platform.color} />}
           <SummaryChip label="Client" value={selectedClient} />
+          
+          {selectedPlatform === 'FABRIC' && (
+            <>
+              <SummaryChip label="Workspace" value={selectedWorkspace?.name || selectedWorkspace?.displayName} color="#6366f1" />
+              <SummaryChip label="Target Pipeline" value={selectedPipeline?.name || selectedPipeline?.displayName} color="#6366f1" />
+              <SummaryChip label="Strategy" value={deploymentStrategy?.replace(/_/g, ' ')} color="#6366f1" />
+              {deploymentPackage && <SummaryChip label="Package" value={deploymentPackage.name} color="#6366f1" />}
+            </>
+          )}
+
           <SummaryChip label="Framework" value={intelligenceData?.framework} />
           <SummaryChip label="Auth" value={intelligenceData?.auth_mode} />
           <SummaryChip label="Scan" value={intelligenceData?.scan_status} />
@@ -91,45 +138,95 @@ export default function StepReviewConfirm({
           <SummaryChip label="Endpoint" value={folderPath} />
         </div>
 
-        <div className="pi-grid">
-          <div className="pi-card">
-            <div className="pi-card-title"><FiDatabase /> Ingestion Support by Framework</div>
-            <JsonBlock value={intelligenceData?.ingestion_support} />
-          </div>
-          <div className="pi-card">
-            <div className="pi-card-title">Source Systems</div>
-            <JsonBlock value={intelligenceData?.source_systems || []} />
-          </div>
-          <div className="pi-card">
-            <div className="pi-card-title"><FiFile /> File Types</div>
-            <JsonBlock value={intelligenceData?.file_types || []} />
-          </div>
-          <div className="pi-card">
-            <div className="pi-card-title"><FiSettings /> Delimiters</div>
-            <JsonBlock value={intelligenceData?.delimiter_config} />
-          </div>
-          <div className="pi-card">
-            <div className="pi-card-title"><FiZap /> DQ Rules</div>
-            <JsonBlock value={intelligenceData?.dq_rules} />
-          </div>
-        </div>
+        {/* Structured Intelligence Cards */}
+        {intelligenceData && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
+            <IntelCard icon={<FiDatabase size={15} />} title="Ingestion Support">
+              <div className="pi-tag-list" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <Tag active={support.file_based}>File-based</Tag>
+                <Tag active={support.api}>API</Tag>
+                <Tag active={support.database}>Database</Tag>
+                <Tag active={support.streaming}>Streaming</Tag>
+                <Tag active={support.batch}>Batch</Tag>
+              </div>
+            </IntelCard>
 
-        <div className="pi-card">
-          <div className="pi-card-title">Generated Config</div>
-          <JsonBlock value={intelligenceData?.reformatted_config} />
-        </div>
+            <IntelCard icon={<FiFile size={15} />} title="File Types">
+              <div className="pi-tag-list" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {(intelligenceData.file_types || []).map((ft) => <Tag key={ft}>{ft}</Tag>)}
+                {(!intelligenceData.file_types || intelligenceData.file_types.length === 0) && <Tag active={false}>None Detected</Tag>}
+              </div>
+            </IntelCard>
 
-        {intelligenceData?.llm_summary && (
-          <div className="pi-card">
-            <div className="pi-card-title">GPT Summary</div>
-            <div className="pi-card-content">{intelligenceData.llm_summary}</div>
+            <IntelCard icon={<FiSettings size={15} />} title="Delimiters">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 12 }}>
+                <div><strong>Delim:</strong> <code>{intelligenceData.delimiter_config?.column_delimiter || ','}</code></div>
+                <div><strong>Quote:</strong> <code>{intelligenceData.delimiter_config?.quote_char || '"'}</code></div>
+                <div><strong>Escape:</strong> <code>{intelligenceData.delimiter_config?.escape_char || '\\\\'}</code></div>
+                <div><strong>Header:</strong> <code>{intelligenceData.delimiter_config?.header ? 'true' : 'false'}</code></div>
+              </div>
+            </IntelCard>
+
+            <IntelCard icon={<FiActivity size={15} />} title="DQ Rules">
+              <div className="pi-tag-list" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {Object.entries(intelligenceData.dq_rules || {}).map(([key, value]) => (
+                  <Tag key={key} active={!!value}>{key.replace(/_/g, ' ')}</Tag>
+                ))}
+              </div>
+            </IntelCard>
+
+            <IntelCard icon={<FiZap size={15} />} title="Pipeline Capabilities">
+              <div className="pi-tag-list" style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {Object.entries(capabilities).filter(([k]) => !['cloud_llm_requested', 'llm_provider', 'scan_mode'].includes(k)).map(([key, value]) => (
+                  <Tag key={key} active={!!value}>{key.replace(/_/g, ' ')}</Tag>
+                ))}
+              </div>
+            </IntelCard>
+
+            {(intelligenceData.source_systems || []).length > 0 && (
+              <IntelCard icon={<FiCpu size={15} />} title="Source Systems">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {intelligenceData.source_systems.map((s, i) => (
+                    <div key={i} style={{ fontSize: 12, padding: '6px 10px', background: 'var(--surface2)', borderRadius: 8 }}>
+                      <strong>{s.name || s.type}</strong>
+                      {s.type && <span style={{ marginLeft: 8, opacity: 0.6 }}>{s.type}</span>}
+                    </div>
+                  ))}
+                </div>
+              </IntelCard>
+            )}
           </div>
         )}
 
-        <div className="pi-card">
-          <div className="pi-card-title">Execution Payload Preview</div>
-          <JsonBlock value={executionPayload} />
-        </div>
+        {/* Interactive Flow */}
+        {flow.length > 0 && (
+          <IntelCard icon={<FiArrowRight size={15} />} title="Pipeline Flow">
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+              {flow.map((step, idx) => (
+                <span key={`${step}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, padding: '6px 14px', borderRadius: 20, background: 'linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.08))', color: '#6366f1', border: '1px solid rgba(99,102,241,0.15)' }}>
+                    {step}
+                  </span>
+                  {idx < flow.length - 1 && <FiArrowRight size={12} style={{ color: 'var(--text3)' }} />}
+                </span>
+              ))}
+            </div>
+          </IntelCard>
+        )}
+
+        {/* GPT Summary */}
+        {intelligenceData?.llm_summary && (
+          <IntelCard icon={<FiCpu size={15} />} title="GPT Summary">
+            <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.6 }}>{intelligenceData.llm_summary}</div>
+          </IntelCard>
+        )}
+
+        {/* Execution Payload Preview */}
+        <IntelCard icon={<FiSettings size={15} />} title="Execution Payload Preview">
+          <pre className="orch-pre" style={{ maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', fontSize: 11 }}>
+            {JSON.stringify(executionPayload, null, 2)}
+          </pre>
+        </IntelCard>
       </div>
 
       <div className="step-footer" style={{ justifyContent: 'space-between' }}>

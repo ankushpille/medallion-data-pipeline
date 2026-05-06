@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { FiActivity, FiArrowRight, FiCheck, FiCloud, FiCpu, FiDatabase, FiFile, FiFolder, FiLink, FiSearch, FiSettings, FiZap } from 'react-icons/fi';
+import { FiActivity, FiArrowRight, FiCheck, FiCloud, FiCpu, FiDatabase, FiFile, FiFolder, FiLink, FiSearch, FiSettings, FiZap, FiRefreshCw, FiCopy, FiEdit2, FiPlus } from 'react-icons/fi';
 import CloudPortalScanModal from './orchestration/CloudPortalScanModal';
 import { apiUrl } from '../hooks/useApi';
 import './PipelineIntelligence.css';
 
 const TARGETS = [
-  { id: 'aws', sourceType: 'AWS', label: 'AWS Connected', icon: <FiCloud />, scan: true },
-  { id: 'azure', sourceType: 'AZURE', label: 'Azure Active (SSO)', icon: <FiCloud />, scan: true },
+  { id: 'aws', sourceType: 'AWS', label: 'AWS Platform', icon: <FiCloud />, scan: true },
+  { id: 'azure', sourceType: 'AZURE', label: 'Azure Platform', icon: <FiCloud />, scan: true },
   { id: 'fabric', sourceType: 'FABRIC', label: 'Microsoft Fabric', icon: <FiZap />, scan: true },
+  { id: 's3', sourceType: 'S3', label: 'Amazon S3', icon: <FiDatabase />, scan: true },
+  { id: 'adls', sourceType: 'ADLS', label: 'Azure Data Lake', icon: <FiDatabase />, scan: true },
   { id: 'api', sourceType: 'REST_API', label: 'REST API', icon: <FiLink />, scan: false },
   { id: 'local', sourceType: 'LOCAL', label: 'Local Files', icon: <FiFolder />, scan: false },
 ];
@@ -52,32 +54,53 @@ function hasApiScanDetails(apiSources = []) {
   });
 }
 
-export default function PipelineIntelligence({ clientName, initialData, clientSourceTypes = [], currentSourceType = '', apiSources = [], fabricDiscoveryData = null, fabricMode = 'DISCOVERY', onScanComplete, onConfirm }) {
+export default function PipelineIntelligence({
+  clientName,
+  initialData,
+  clientSourceTypes = [],
+  currentSourceType = '',
+  apiSources = [],
+  fabricDiscoveryData = null,
+  fabricMode = 'DISCOVERY',
+  selectedPlatform = '',
+  onScanComplete,
+  onConfirm
+}) {
   const [data, setData] = useState(initialData || null);
   const [loading, setLoading] = useState(false);
+  const [scanInProgress, setScanInProgress] = useState(false);
   const [error, setError] = useState(null);
   const [target, setTarget] = useState(initialData?.ingestion_details?.target || 'aws');
   const [useCloudLlm, setUseCloudLlm] = useState(true);
   const [showCloudScanModal, setShowCloudScanModal] = useState(false);
+
+  // Fabric-specific orchestration state
+  const [deploymentStrategy, setDeploymentStrategy] = useState(null);
+
   const configuredSourceTypes = useMemo(
     () => {
       const values = (clientSourceTypes || []).map((item) => String(item || '').toUpperCase()).filter(Boolean);
       const current = String(currentSourceType || '').toUpperCase();
-      const mapped = current === 'S3' ? 'AWS' : current === 'ADLS' ? 'AZURE' : current === 'API' ? 'REST_API' : current;
+      const mapped = current === 'API' ? 'REST_API' : current;
       if (mapped) values.push(mapped);
+      // When platform is FABRIC, always include FABRIC as a scannable target
+      if (selectedPlatform === 'FABRIC' && !values.includes('FABRIC')) values.push('FABRIC');
       return [...new Set(values)];
     },
-    [clientSourceTypes, currentSourceType]
+    [clientSourceTypes, currentSourceType, selectedPlatform]
   );
+
   const allowedTargets = useMemo(
     () => TARGETS.filter((item) => configuredSourceTypes.includes(item.sourceType)),
     [configuredSourceTypes]
   );
+
   const selectedTarget = allowedTargets.find((item) => item.id === target);
   const apiDetailsAvailable = hasApiScanDetails(apiSources);
   const selectedRequiresScan = selectedTarget?.sourceType
-    ? (['AWS', 'AZURE', 'FABRIC'].includes(selectedTarget.sourceType) || (selectedTarget.sourceType === 'REST_API' && apiDetailsAvailable))
+    ? (['AWS', 'AZURE', 'FABRIC', 'S3', 'ADLS'].includes(selectedTarget.sourceType) || (selectedTarget.sourceType === 'REST_API' && apiDetailsAvailable))
     : false;
+
   const selectedMessage = (() => {
     if (selectedTarget?.sourceType === 'LOCAL') return 'Local File Mode: No scan required. Proceed to upload files.';
     if (selectedTarget?.sourceType === 'REST_API' && !apiDetailsAvailable) return 'Provide API details to enable scanning';
@@ -89,10 +112,15 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
   const delimiter = data?.delimiter_config || {};
   const capabilities = data?.pipeline_capabilities || {};
 
+  // Reset state when client or initial data changes, but avoid loops
   useEffect(() => {
-    setData(initialData || null);
+    console.log("INTELLIGENCE: Initial data or client changed", { clientName, hasInitialData: !!initialData });
+    if (initialData) {
+      setData(initialData);
+    }
     setError(null);
     setLoading(false);
+    setScanInProgress(false);
   }, [clientName, initialData]);
 
   useEffect(() => {
@@ -105,39 +133,106 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
     }
   }, [allowedTargets, target]);
 
+  // Auto-analysis trigger for Fabric
   useEffect(() => {
-    if (currentSourceType === 'FABRIC' && fabricDiscoveryData && !data && !loading) {
-        // Automatically run analysis for discovered or deployed fabric pipeline
-        runFabricAnalysis();
+    const isFabric = currentSourceType === 'FABRIC' || selectedPlatform === 'FABRIC';
+    if (isFabric && fabricDiscoveryData && !data && !loading && !scanInProgress) {
+      console.log("INTELLIGENCE: Auto-triggering Fabric analysis");
+      runFabricAnalysis();
     }
-  }, [currentSourceType, fabricDiscoveryData]);
+  }, [currentSourceType, selectedPlatform, fabricDiscoveryData, data, loading, scanInProgress]);
 
   const runFabricAnalysis = async () => {
+    if (scanInProgress) return;
+
+    console.log("INTELLIGENCE START: Fabric Analysis");
+    setScanInProgress(true);
     setLoading(true);
     setError(null);
+
     try {
+      const requestPayload = {
+        client_name: clientName,
+        platform: 'FABRIC',
+        source_type: 'FABRIC',
+        target: 'fabric',
+        payload: fabricDiscoveryData.pipeline_json || fabricDiscoveryData.pipeline || fabricDiscoveryData,
+        use_cloud_llm: useCloudLlm
+      };
+
+      console.log("INTELLIGENCE REQUEST", requestPayload);
+
       const response = await fetch(apiUrl('/discovery/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            client_name: clientName,
-            source_type: 'fabric',
-            target: 'fabric',
-            payload: fabricDiscoveryData.pipeline_json || fabricDiscoveryData.pipeline || fabricDiscoveryData,
-            use_cloud_llm: useCloudLlm
-        }),
+        body: JSON.stringify(requestPayload),
       });
-      if (!response.ok) throw new Error('Fabric analysis failed');
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || errorData.message || 'Fabric analysis failed');
+      }
+
       const result = await response.json();
+      console.log("INTELLIGENCE RESPONSE", result);
+
       const finalResult = { ...result, scan_status: 'success', scan_completed: true };
       setData(finalResult);
       onScanComplete?.(finalResult);
+      console.log("INTELLIGENCE COMPLETE");
     } catch (e) {
+      console.error("INTELLIGENCE ERROR", e);
       setError(e.message);
     } finally {
       setLoading(false);
+      setScanInProgress(false);
     }
   };
+
+  const handleManualApiScan = async () => {
+    if (scanInProgress) return;
+
+    console.log("INTELLIGENCE START: API Scan");
+    setScanInProgress(true);
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(apiUrl('/discovery/api-scan'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_name: clientName }),
+      });
+
+      if (!response.ok) {
+        let message = `API scan failed with status ${response.status}`;
+        try {
+          const failure = await response.json();
+          message = failure.detail || failure.message || message;
+        } catch { }
+        throw new Error(message);
+      }
+
+      const result = await response.json();
+      console.log("INTELLIGENCE RESPONSE", result);
+      setData(result);
+      onScanComplete?.(result);
+      console.log("INTELLIGENCE COMPLETE");
+    } catch (scanError) {
+      console.error("INTELLIGENCE ERROR", scanError);
+      setError(scanError?.message || 'REST API scan failed.');
+    } finally {
+      setLoading(false);
+      setScanInProgress(false);
+    }
+  };
+
+  const STRATEGIES = [
+    { id: 'REUSE', label: 'Reuse Existing', desc: 'Use existing orchestration with updated sources', icon: <FiRefreshCw /> },
+    { id: 'CLONE', label: 'Clone Pipeline', desc: 'Duplicate orchestration for a new instance', icon: <FiCopy /> },
+    { id: 'MODIFY', label: 'Modify Template', desc: 'Patch existing pipeline structure', icon: <FiEdit2 /> },
+    { id: 'CREATE_NEW', label: 'Create New', desc: 'Generate fresh pipeline from pattern', icon: <FiPlus /> },
+  ];
 
   return (
     <div className="pipeline-intelligence-container">
@@ -155,6 +250,7 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
             className={`pi-target-card ${target === item.id ? 'selected' : ''}`}
             onClick={() => setTarget(item.id)}
             type="button"
+            disabled={loading || scanInProgress}
           >
             <span className="pi-target-icon">{item.icon}</span>
             <span>{item.label}</span>
@@ -178,93 +274,73 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
       )}
 
       {selectedTarget?.sourceType !== 'LOCAL' && (
-        <label className="pi-checkbox-row">
-          <input type="checkbox" checked={useCloudLlm} onChange={(e) => setUseCloudLlm(e.target.checked)} />
+        <label className="pi-checkbox-row" style={{ opacity: loading ? 0.6 : 1 }}>
+          <input
+            type="checkbox"
+            checked={useCloudLlm}
+            onChange={(e) => setUseCloudLlm(e.target.checked)}
+            disabled={loading || scanInProgress}
+          />
           <span>Use GPT API to extract ingestion, source, and DQ rules</span>
         </label>
       )}
 
       <div className="pi-scan-trigger">
         {selectedTarget?.sourceType !== 'REST_API' && (
-        <button
-          className="pi-btn-confirm"
-          onClick={() => {
-            if (!clientName) {
-              setError('Missing client selection.');
-              return;
-            }
-            if (!selectedTarget) {
-              setError('No source type is configured for this client.');
-              return;
-            }
-            if (!selectedRequiresScan) {
-              setError(`${selectedTarget.label} does not require a framework scan. Continue to Data Sources and use the registered/manual source.`);
-              return;
-            }
-            setError(null);
-            setShowCloudScanModal(true);
-          }}
-          disabled={loading || !clientName || !selectedRequiresScan}
-        >
-          <FiSearch /> Scan Framework
-        </button>
+          <button
+            className="pi-btn-confirm"
+            onClick={() => {
+              if (!clientName) {
+                setError('Missing client selection.');
+                return;
+              }
+              if (!selectedTarget) {
+                setError('No source type is configured for this client.');
+                return;
+              }
+              if (!selectedRequiresScan) {
+                setError(`${selectedTarget.label} does not require a framework scan. Continue to Data Sources and use the registered/manual source.`);
+                return;
+              }
+              setError(null);
+              setShowCloudScanModal(true);
+            }}
+            disabled={loading || scanInProgress || !clientName || !selectedRequiresScan}
+          >
+            <FiSearch /> Scan Framework
+          </button>
         )}
         {selectedTarget?.sourceType === 'REST_API' && apiDetailsAvailable && (
           <button
             className="pi-btn-confirm"
-            onClick={async () => {
-              setLoading(true);
-              setError(null);
-              try {
-                const response = await fetch(apiUrl('/discovery/api-scan'), {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ client_name: clientName }),
-                });
-                if (!response.ok) {
-                  let message = `API scan failed with status ${response.status}`;
-                  try {
-                    const failure = await response.json();
-                    message = failure.detail || failure.message || message;
-                  } catch {}
-                  throw new Error(message);
-                }
-                const result = await response.json();
-                setData(result);
-                onScanComplete?.(result);
-              } catch (scanError) {
-                setError(scanError?.message || 'REST API scan failed.');
-              } finally {
-                setLoading(false);
-              }
-            }}
-            disabled={loading || !clientName}
+            onClick={handleManualApiScan}
+            disabled={loading || scanInProgress || !clientName}
             type="button"
           >
             <FiSearch /> Scan REST API
           </button>
         )}
         {selectedTarget && !selectedRequiresScan && (
-          <button className="pi-btn-secondary" onClick={() => onConfirm(null)} type="button">
+          <button className="pi-btn-secondary" onClick={() => onConfirm(null)} type="button" disabled={loading || scanInProgress}>
             Continue to Data Sources
           </button>
         )}
       </div>
 
-      {currentSourceType === 'FABRIC' && !data && !loading && (
-          <div className="pi-card pi-wide" style={{ marginTop: '20px' }}>
-             <div className="pi-card-title"><FiCheck color="#10b981" /> {fabricMode === 'DEPLOY' ? 'Fabric Deployment Ready' : 'Fabric Connection Ready'}</div>
-             <div className="pi-card-content">
-                {fabricMode === 'DEPLOY' 
-                  ? 'Fabric pipeline has been deployed to the target workspace. Local analysis is being prepared.' 
-                  : 'Connected to Microsoft Fabric via SSO. You can now scan the environment or proceed manually.'}
-             </div>
-             {fabricMode !== 'DEPLOY' && (
-               <div className="pi-actions" style={{ marginTop: '20px' }}>
-                  <button className="pi-btn-confirm" onClick={() => onConfirm(null)}>Continue to Data Sources</button>
-               </div>
-             )}
+      {(currentSourceType === 'FABRIC' || selectedPlatform === 'FABRIC') && !data && !loading && !scanInProgress && (
+        <div className="pi-card pi-wide" style={{ marginTop: '20px' }}>
+          <div className="pi-card-title"><FiCheck color="#10b981" /> {fabricMode === 'DEPLOY' ? 'Fabric Deployment Ready' : 'Fabric Platform Selected'}</div>
+          <div className="pi-card-content">
+            {fabricMode === 'DEPLOY'
+              ? 'Fabric pipeline has been deployed to the target workspace. Local analysis is being prepared.'
+              : 'Microsoft Fabric is your execution platform. Use Scan Framework to discover pipelines, or continue to configure data sources manually.'}
           </div>
+          {fabricMode !== 'DEPLOY' && (
+            <div className="pi-actions" style={{ marginTop: '20px' }}>
+              <button className="pi-btn-confirm" onClick={() => onConfirm(null)}>Continue to Data Sources</button>
+            </div>
+          )}
+        </div>
       )}
 
       {loading && (
@@ -292,6 +368,30 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
 
       {data && (
         <>
+          {selectedPlatform === 'FABRIC' && (
+            <div className="pi-card pi-wide" style={{ border: '1px solid #3b82f6', background: 'rgba(59, 130, 246, 0.05)' }}>
+              <div className="pi-card-title" style={{ color: '#2563eb' }}><FiSettings /> Pipeline Reuse Strategy</div>
+              <div className="pi-card-content" style={{ marginBottom: 16 }}>
+                Based on the orchestration intelligence, select how you want to deploy this pipeline pattern.
+              </div>
+              <div className="pi-strategy-grid">
+                {STRATEGIES.map((s) => (
+                  <button
+                    key={s.id}
+                    className={`pi-strategy-card ${deploymentStrategy === s.id ? 'selected' : ''}`}
+                    onClick={() => setDeploymentStrategy(s.id)}
+                  >
+                    <div className="pi-strategy-icon">{s.icon}</div>
+                    <div className="pi-strategy-info">
+                      <div className="pi-strategy-label">{s.label}</div>
+                      <div className="pi-strategy-desc">{s.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="pi-grid">
             <div className="pi-card">
               <div className="pi-card-title"><FiCpu /> Detected Framework</div>
@@ -422,8 +522,12 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
           </div>
 
           <div className="pi-actions">
-            <button className="pi-btn-confirm" onClick={() => onConfirm(data)} disabled={data.scan_status === 'failed'}>
-              <FiCheck /> Review Data Sources
+            <button
+              className="pi-btn-confirm"
+              onClick={() => onConfirm({ ...data, deploymentStrategy })}
+              disabled={data.scan_status === 'failed' || (selectedPlatform === 'FABRIC' && !deploymentStrategy)}
+            >
+              <FiCheck /> {selectedPlatform === 'FABRIC' ? 'Confirm Strategy & Review Sources' : 'Review Data Sources'}
             </button>
           </div>
         </>
@@ -438,11 +542,17 @@ export default function PipelineIntelligence({ clientName, initialData, clientSo
           useCloudLlm={useCloudLlm}
           onTargetChange={setTarget}
           onClose={() => {
+            console.log("INTELLIGENCE: Scan Modal Closed");
             setLoading(false);
+            setScanInProgress(false);
             setShowCloudScanModal(false);
           }}
           onScanComplete={(result) => {
+            console.log("INTELLIGENCE: Scan Modal Completed", result);
             setData(result);
+            setLoading(false);
+            setScanInProgress(false);
+            setShowCloudScanModal(false);
             onScanComplete?.(result);
           }}
         />

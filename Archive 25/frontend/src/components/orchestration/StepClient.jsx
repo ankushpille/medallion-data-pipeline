@@ -1,12 +1,9 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { FiCheck, FiSearch, FiPlus, FiRefreshCw, FiTrash2, FiClock, FiAlertTriangle, FiX, FiLink, FiBox, FiCloud, FiFolder, FiZap, FiActivity, FiUploadCloud } from 'react-icons/fi';
+import { FiCheck, FiSearch, FiPlus, FiRefreshCw, FiTrash2, FiClock, FiAlertTriangle, FiX, FiLink, FiBox, FiCloud, FiFolder } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import FluentSelect from '../FluentSelect';
-import FabricWorkspace from './FabricWorkspace';
-import FabricDiscovery from './FabricDiscovery';
-import FabricDeploy from './FabricDeploy';
 import logo from '../../assets/images/image.png';
 
 const itemVariants = {
@@ -20,7 +17,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
   const [searchQuery, setSearchQuery] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [clientToDelete, setClientToDelete] = useState(null);
-  const [fabricWorkspace, setFabricWorkspace] = useState(null);
+
 
   const filteredClients = (clients || []).filter(c =>
     c.toLowerCase().includes(searchQuery.toLowerCase())
@@ -218,7 +215,6 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 {[
                   { id: 'LOCAL', label: 'Local Files', icon: <FiFolder />, color: '#10b981', desc: 'Direct upload' },
                   { id: 'API', label: 'REST API', icon: <FiLink />, color: '#3b82f6', desc: 'Secure endpoints' },
-                  { id: 'FABRIC', label: 'Microsoft Fabric', icon: <FiZap />, color: '#6366f1', desc: 'Discovery & Deploy' },
                   { id: 'S3', label: 'AWS S3', icon: <FiBox />, color: '#f59e0b', desc: 'Cloud buckets' },
                   { id: 'ADLS', label: 'Azure ADLS', icon: <FiCloud />, color: '#0078d4', desc: 'Azure storage' }
                 ].map(t => (
@@ -456,72 +452,8 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                   </motion.div>
                 )}
 
-                {sourceForm.source_type === 'FABRIC' && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fabric-virtual-setup" style={{ gridColumn: 'span 2', marginTop: '20px' }}>
-                    {!sourceForm.fabricToken ? (
-                      <FabricWorkspace
-                        call={call}
-                        toast={toast}
-                        onConnected={(token) => setSourceForm({ ...sourceForm, fabricToken: token })}
-                      />
-                    ) : (
-                      <div className="fabric-setup-container" style={{ padding: '24px', background: 'rgba(255,255,255,0.03)', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                        <div className="fabric-setup-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                          <div style={{ fontWeight: 800 }}>Fabric Configuration</div>
-                          <div className="mode-tabs" style={{ display: 'flex', gap: '8px' }}>
-                            <button
-                              className={`orch-btn tiny ${sourceForm.fabricMode === 'discover' ? 'primary' : 'ghost'}`}
-                              onClick={() => setSourceForm({ ...sourceForm, fabricMode: 'discover' })}
-                            >
-                              <FiSearch style={{ marginRight: '6px' }} /> Discover
-                            </button>
-                            <button
-                              className={`orch-btn tiny ${sourceForm.fabricMode === 'deploy' ? 'primary' : 'ghost'}`}
-                              onClick={() => setSourceForm({ ...sourceForm, fabricMode: 'deploy' })}
-                            >
-                              <FiUploadCloud style={{ marginRight: '6px' }} /> Deploy
-                            </button>
-                          </div>
-                        </div>
 
-                        {sourceForm.fabricMode === 'discover' ? (
-                          <FabricDiscovery
-                            token={sourceForm.fabricToken}
-                            call={call}
-                            toast={toast}
-                            selectedWorkspace={fabricWorkspace}
-                            setSelectedWorkspace={setFabricWorkspace}
-                            onPipelineSelected={(data) => {
-                              setSourceForm({
-                                ...sourceForm,
-                                fabricMode: 'DISCOVERY',
-                                fabricDiscoveryData: data
-                              });
-                              toast('Pipeline discovery complete!', 'success');
-                            }}
-                          />
-                        ) : (
-                          <FabricDeploy
-                            token={sourceForm.fabricToken}
-                            call={call}
-                            toast={toast}
-                            selectedWorkspace={fabricWorkspace}
-                            onDeploySuccess={(data) => {
-                              setSourceForm({
-                                ...sourceForm,
-                                fabricMode: 'DEPLOY',
-                                fabricDiscoveryData: data
-                              });
-                              onDeploySuccess?.();
-                              toast('Pipeline deployed and captured!', 'success');
-                            }}
-                          />
-                        )}
 
-                      </div>
-                    )}
-                  </motion.div>
-                )}
 
                 {sourceForm.source_type === 'LOCAL' && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ padding: '20px', background: 'var(--blue-bg)', borderRadius: 12, marginTop: 12 }}>
@@ -568,23 +500,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                 </button>
               )}
 
-              {sourceForm.source_type === 'FABRIC' ? (
-                <button
-                  className={`orch-btn primary premium-btn ${(sourceForm.fabricDiscoveryData || sourceForm.fabricMode === 'deploy') ? '' : 'disabled-btn'}`}
-                  onClick={() => {
-                    if (sourceForm.fabricMode === 'discover' && !sourceForm.fabricDiscoveryData) {
-                      toast('Please discover a pipeline first', 'warning');
-                      return;
-                    }
-                    onNext();
-                  }}
-                  disabled={sourceForm.fabricMode === 'discover' && !sourceForm.fabricDiscoveryData}
-                  style={{ flex: 1 }}
-                >
-                  Continue to Intelligence →
-                </button>
-              ) : (
-                <button
+              <button
                   className={`orch-btn primary premium-btn ${(connectionVerified || sourceForm.source_type === 'LOCAL' || apiCanSkipConnection) ? '' : 'disabled-btn'}`}
                   onClick={() => {
                     if (sourceForm.source_type === 'LOCAL') {
@@ -606,7 +522,6 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
                     sourceForm.source_type === 'LOCAL' ? 'Continue to Upload →' :
                       `🚀 Register ${sourceForm.source_type || 'API'} Source`}
                 </button>
-              )}
             </div>
           </div>
         </div>

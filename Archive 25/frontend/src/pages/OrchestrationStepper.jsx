@@ -6,24 +6,27 @@ import { FiX, FiCheck, FiZap, FiEdit2, FiRefreshCw, FiBarChart2, FiClipboard, Fi
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation, useNavigate } from 'react-router-dom';
 import FluentSelect from '../components/FluentSelect';
+import StepPlatform from '../components/orchestration/StepPlatform';
 import StepClient from '../components/orchestration/StepClient';
 import StepSources from '../components/orchestration/StepSources';
 import StepConfig from '../components/orchestration/StepConfig';
 import StepDQ from '../components/orchestration/StepDQ';
 import StepProgress from '../components/orchestration/StepProgress';
 import StepReviewConfirm from '../components/orchestration/StepReviewConfirm';
+import StepDeployment from '../components/orchestration/StepDeployment';
 import PipelineIntelligence from '../components/PipelineIntelligence';
 import HistoryView from './HistoryView';
 import './orchestration.css';
 import logo from "../assets/images/image.png"
 
 const STEPS = [
+  { num: 0, label: 'Platform' },
   { num: 1, label: 'Client' },
   { num: 2, label: 'Intelligence' },
-  { num: 3, label: 'Data Sources' },
-  { num: 4, label: 'Configuration' },
+  { num: 3, label: 'Deployment' }, // Fabric Only
+  { num: 4, label: 'Sources & Config' },
   { num: 5, label: 'DQ Rules' },
-  { num: 6, label: 'Review & Confirm' },
+  { num: 6, label: 'Review' },
   { num: 7, label: 'Execution' },
 ];
 
@@ -39,7 +42,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const toast = useToast();
   const nav = useNavigate();
   const { call, loading } = useApi();
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(0);
+  const [selectedPlatform, setSelectedPlatform] = useState(localStorage.getItem('selected_platform') || '');
   const [clients, setClients] = useState([]);
   const [selectedClient, setSelectedClient] = useState(localStorage.getItem('client_name') || '');
   const [sourceType, setSourceType] = useState('');
@@ -77,6 +81,12 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [selectedSources, setSelectedSources] = useState([]);
   const [extractedFabricData, setExtractedFabricData] = useState(null);
   const [pipelineDeployed, setPipelineDeployed] = useState(false);
+
+  // Fabric/Orchestration State
+  const [deploymentStrategy, setDeploymentStrategy] = useState(null);
+  const [deploymentPackage, setDeploymentPackage] = useState(null);
+  const [selectedWorkspace, setSelectedWorkspace] = useState(null);
+  const [selectedPipeline, setSelectedPipeline] = useState(null);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
@@ -116,6 +126,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   };
 
   function resetSessionState({ clearSourceSelection = false } = {}) {
+    console.log("STEPPER: Resetting session state", { clearSourceSelection });
     setIntelligenceData(null);
     setConfigPersisted(false);
     setDatasets([]);
@@ -125,10 +136,17 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setSelectedDqDataset(null);
     setDqError(null);
     setSelectedSources([]);
+    setPipelineDeployed(false);
+    setDeploymentStrategy(null);
+    setDeploymentPackage(null);
+    setSelectedWorkspace(null);
+    setSelectedPipeline(null);
+
     if (clearSourceSelection) {
       setSelectedApiSource(null);
       setSelectedEndpoint('');
       setFolderPath('');
+      setSourceType('');
       setApiSources([]);
       setS3Sources([]);
       setAdlsSources([]);
@@ -821,15 +839,20 @@ export default function OrchestrationStepper({ hideHeader = false }) {
           {/* Stepper Bar */}
           <div className="stepper-bar">
             <div className="stepper-steps-container" style={{ display: 'flex', alignItems: 'center', gap: 0, flex: 1, justifyContent: 'center' }}>
-              {STEPS.map((s, idx) => (
-                <div key={s.num} className={`stepper-item ${step === s.num ? 'active' : ''} ${step > s.num ? 'done' : ''}`}>
-                  <div className="stepper-num" onClick={() => { if (step > s.num) setStep(s.num); }}>
-                    {step > s.num ? <FiCheck size={18} /> : s.num}
+              {STEPS.map((s, idx) => {
+                // Skip 'Deployment' step label if not Fabric
+                if (s.num === 3 && selectedPlatform !== 'FABRIC') return null;
+                
+                return (
+                  <div key={s.num} className={`stepper-item ${step === s.num ? 'active' : ''} ${step > s.num ? 'done' : ''}`}>
+                    <div className="stepper-num" onClick={() => { if (step > s.num) setStep(s.num); }}>
+                      {step > s.num ? <FiCheck size={18} /> : s.num}
+                    </div>
+                    <span className="stepper-label">{s.label}</span>
+                    {idx < STEPS.length - 1 && <div className="stepper-connector" />}
                   </div>
-                  <span className="stepper-label">{s.label}</span>
-                  {idx < STEPS.length - 1 && <div className="stepper-connector" />}
-                </div>
-              ))}
+                );
+              })}
             </div>
             
             <div className="stepper-actions" style={{ position: 'absolute', right: 40, display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -862,6 +885,16 @@ export default function OrchestrationStepper({ hideHeader = false }) {
 
           <div className="stepper-content">
             <AnimatePresence mode="wait">
+              {step === 0 && (
+                <StepPlatform
+                  selectedPlatform={selectedPlatform}
+                  setSelectedPlatform={(p) => {
+                    setSelectedPlatform(p);
+                    localStorage.setItem('selected_platform', p);
+                  }}
+                  onNext={() => setStep(1)}
+                />
+              )}
               {step === 1 && (
                 <StepClient
                   clients={clients}
@@ -874,11 +907,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                       setSourceType('LOCAL');
                       setClientSourceTypes(['LOCAL']);
                       resetSessionState({ clearSourceSelection: true });
-                    }
-                    if (sourceForm.source_type === 'FABRIC') {
-                      setSourceType('FABRIC');
-                      setClientSourceTypes(['FABRIC']);
-                      // Intelligence will use sourceForm.fabricDiscoveryData.pipeline_json
                     }
                     setStep(2);
                   }}
@@ -906,80 +934,109 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   apiSources={apiSources}
                   fabricDiscoveryData={sourceForm.fabricDiscoveryData} // Pass the discovered data
                   fabricMode={sourceForm.fabricMode}
+                  selectedPlatform={selectedPlatform}
                   onScanComplete={(data) => {
+                    console.log("STEPPER: Intelligence scan completed", data);
                     setIntelligenceData(data);
                     setConfigPersisted(false);
                     setDatasets([]);
                     setOrchestrateResp(null);
                     setSelectedApiSource('intelligence-scan');
+                    
                     const details = data?.ingestion_details || data?.reformatted_config || {};
                     if (details.source_type) setSourceType(details.source_type);
                     if (details.source_path) {
                       setFolderPath(details.source_path);
                       setSelectedEndpoint(details.source_path);
-                    } else {
-                      setFolderPath('');
-                      setSelectedEndpoint('');
+                    }
+
+                    // Extract Fabric workspace/pipeline if present in scan
+                    if (data?.raw_cloud_scan?.fabric_workspaces?.[0]) {
+                      setSelectedWorkspace(data.raw_cloud_scan.fabric_workspaces[0]);
+                    }
+                    if (data?.data_pipelines?.[0]) {
+                      setSelectedPipeline(data.data_pipelines[0]);
                     }
                   }}
                   onConfirm={(data) => {
                     if (data) {
                       setIntelligenceData(data);
-                      setConfigPersisted(false);
-                      setDatasets([]);
-                      setOrchestrateResp(null);
-                      setSelectedApiSource('intelligence-scan');
+                      if (data.deploymentStrategy) setDeploymentStrategy(data.deploymentStrategy);
+                      
+                      // Also update workspace/pipeline if confirm payload has them
+                      if (data.selectedWorkspace) setSelectedWorkspace(data.selectedWorkspace);
+                      if (data.selectedPipeline) setSelectedPipeline(data.selectedPipeline);
                     }
-                    setStep(3);
+                    if (selectedPlatform === 'FABRIC') {
+                      setStep(3);
+                    } else {
+                      setStep(4);
+                    }
                   }}
                 />
               )}
               {step === 3 && (
-                <StepSources
-                  selectedClient={selectedClient}
-                  apiSources={apiSources}
-                  s3Sources={s3Sources}
-                  adlsSources={adlsSources}
-                  apiSourcesLoading={apiSourcesLoading}
-                  selectedApiSource={selectedApiSource}
-                  setSelectedApiSource={setSelectedApiSource}
-                  onDeploySuccess={() => setPipelineDeployed(true)}
-                  selectedEndpoint={selectedEndpoint}
-                  setSelectedEndpoint={setSelectedEndpoint}
-                  sourceType={sourceType}
-                  setSourceType={setSourceType}
-                  setFolderPath={setFolderPath}
-                  setShowUploadModal={setShowUploadModal}
-                  openExplorer={openExplorer}
-                  call={call}
-                  refreshTrigger={localRefreshTrigger}
-                  intelligenceData={intelligenceData}
-                  configPersisted={configPersisted}
-                  setConfigPersisted={setConfigPersisted}
-                  clientSourceTypes={clientSourceTypes}
-                  setSelectedSources={setSelectedSources}
-                  toast={toast}
-                  onManualSourceSelected={() => resetSessionState({ clearSourceSelection: false })}
-                  onNext={() => { setStep(4); }}
-                  extractedFabricData={extractedFabricData}
-                  setExtractedFabricData={setExtractedFabricData}
-                  fabricMode={sourceForm.fabricMode}
-                  setPipelineDeployed={setPipelineDeployed}
+                <StepDeployment
+                  selectedWorkspace={selectedWorkspace}
+                  selectedPipeline={selectedPipeline}
+                  deploymentStrategy={deploymentStrategy}
+                  deploymentPackage={deploymentPackage}
+                  setDeploymentPackage={setDeploymentPackage}
+                  onNext={() => setStep(4)}
                 />
               )}
               {step === 4 && (
-                <StepConfig
-                  selectedClient={selectedClient}
-                  folderPath={folderPath}
-                  sourceType={sourceType}
-                  call={call}
-                  toast={toast}
-                  onNext={() => { fetchDatasets(); setStep(5); }}
-                  syncMasterConfig={syncMasterConfig}
-                  intelligenceData={intelligenceData}
-                  fabricMode={sourceForm.fabricMode}
-                  setConfigPersisted={setConfigPersisted}
-                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 40 }}>
+                  <StepSources
+                    selectedClient={selectedClient}
+                    apiSources={apiSources}
+                    s3Sources={s3Sources}
+                    adlsSources={adlsSources}
+                    apiSourcesLoading={apiSourcesLoading}
+                    selectedApiSource={selectedApiSource}
+                    setSelectedApiSource={setSelectedApiSource}
+                    onDeploySuccess={() => setPipelineDeployed(true)}
+                    selectedEndpoint={selectedEndpoint}
+                    setSelectedEndpoint={setSelectedEndpoint}
+                    sourceType={sourceType}
+                    setSourceType={setSourceType}
+                    setFolderPath={setFolderPath}
+                    setShowUploadModal={setShowUploadModal}
+                    openExplorer={openExplorer}
+                    call={call}
+                    refreshTrigger={localRefreshTrigger}
+                    intelligenceData={intelligenceData}
+                    configPersisted={configPersisted}
+                    setConfigPersisted={setConfigPersisted}
+                    clientSourceTypes={clientSourceTypes}
+                    setSelectedSources={setSelectedSources}
+                    toast={toast}
+                    onManualSourceSelected={() => {}}
+                    onNext={() => {}}
+                    extractedFabricData={extractedFabricData}
+                    setExtractedFabricData={setExtractedFabricData}
+                    fabricMode={sourceForm.fabricMode}
+                    setPipelineDeployed={setPipelineDeployed}
+                    selectedPlatform={selectedPlatform}
+                  />
+                  
+                  <div style={{ padding: '0 20px' }}>
+                    <div style={{ height: '1px', background: 'var(--border)', margin: '40px 0' }} />
+                  </div>
+
+                  <StepConfig
+                    selectedClient={selectedClient}
+                    folderPath={folderPath}
+                    sourceType={sourceType}
+                    call={call}
+                    toast={toast}
+                    onNext={() => { fetchDatasets(); setStep(5); }}
+                    syncMasterConfig={syncMasterConfig}
+                    intelligenceData={intelligenceData}
+                    fabricMode={sourceForm.fabricMode}
+                    setConfigPersisted={setConfigPersisted}
+                  />
+                </div>
               )}
               {step === 5 && (
                 <StepDQ
@@ -1030,6 +1087,11 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   isOrchestrating={isOrchestrating}
                   fabricMode={sourceForm.fabricMode}
                   pipelineDeployed={pipelineDeployed}
+                  selectedPlatform={selectedPlatform}
+                  deploymentStrategy={deploymentStrategy}
+                  deploymentPackage={deploymentPackage}
+                  selectedWorkspace={selectedWorkspace}
+                  selectedPipeline={selectedPipeline}
                 />
               )}
               {step === 7 && (

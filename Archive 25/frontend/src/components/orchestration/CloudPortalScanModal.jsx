@@ -239,21 +239,43 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         authMode = 'credentials';
       }
 
+      // Platforms vs source-type connectors are architecturally separate.
+      // `target` here is the PLATFORM (fabric / azure / aws).
+      // `sourceType` prop is the DATA-SOURCE CONNECTOR (REST_API / S3 / ADLS / LOCAL).
+      // The backend /discovery/analyze now accepts both as distinct fields.
+      const PLATFORM_TARGETS = ['fabric', 'azure', 'aws', 'databricks'];
+      const isTargetPlatform = PLATFORM_TARGETS.includes(target);
+
+      const requestBody = {
+        client_name: selectedClient,
+        scan_mode: 'live',
+        auth_mode: authMode,
+        credentials: requestCredentials,
+        use_cloud_llm: useCloudLlm,
+        llm_provider: 'gpt',
+      };
+
+      // Always set target for the scanner routing
+      requestBody.target = target;
+
+      if (isTargetPlatform) {
+        // Tell the backend which platform this scan is for
+        requestBody.platform = target.toUpperCase();
+      } else {
+        // Legacy: target is itself a source-type connector (e.g. direct s3/adls scan)
+        requestBody.source_type = sourceType || target;
+      }
+
+      // If a separate data-source connector is also provided, include it
+      if (sourceType && !PLATFORM_TARGETS.includes((sourceType || '').toLowerCase())) {
+        requestBody.source_type = sourceType;
+      }
+
       const response = await fetch(backendUrl('/discovery/analyze'), {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          client_name: selectedClient,
-          target,
-          source_type: sourceType,
-          scan_mode: 'live',
-          auth_mode: authMode,
-          credentials: requestCredentials,
-          use_cloud_llm: useCloudLlm,
-          llm_provider: 'gpt',
-        }),
+        body: JSON.stringify(requestBody),
       });
-
       if (!response.ok) {
         let message = `Scan failed with status ${response.status}`;
         try {

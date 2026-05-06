@@ -19,6 +19,9 @@ router = APIRouter(prefix="/discovery", tags=["Pipeline Intelligence"])
 
 class AnalyzeRequest(BaseModel):
     client_name: str
+    # platform identifies the execution layer (FABRIC, DATABRICKS, AWS, AZURE)
+    # it is NOT a source connector and must never be validated against registered sources
+    platform: Optional[str] = None
     target: Optional[str] = None
     auth_mode: Optional[str] = None
     credentials: Optional[Dict[str, Any]] = None
@@ -109,7 +112,15 @@ def _endpoint_url(base_url: str, endpoint: str) -> str:
     return f"{base_url.rstrip('/')}/{endpoint.strip('/')}" if endpoint else base_url.rstrip("/")
 
 
+# Canonical identifiers that represent EXECUTION PLATFORMS.
+PLATFORM_IDENTIFIERS: set[str] = {"FABRIC", "DATABRICKS", "AWS", "AZURE"}
+
+# Canonical identifiers that represent DATA-SOURCE CONNECTORS.
+SOURCE_CONNECTOR_IDENTIFIERS: set[str] = {"REST_API", "S3", "ADLS", "LOCAL", "AWS", "AZURE"}
+
+
 def _canonical_source_type(value: Optional[str]) -> Optional[str]:
+    """Normalise a data-source connector name to its canonical upper-case form."""
     raw = (value or "").strip().upper()
     if raw in {"AWS", "S3"}:
         return "AWS"
@@ -122,6 +133,29 @@ def _canonical_source_type(value: Optional[str]) -> Optional[str]:
     if raw == "LOCAL":
         return "LOCAL"
     return raw or None
+
+
+def _canonical_platform(value: Optional[str]) -> Optional[str]:
+    """Normalise a platform name to its canonical upper-case form."""
+    raw = (value or "").strip().upper()
+    mapping = {
+        "FABRIC": "FABRIC",
+        "MICROSOFT_FABRIC": "FABRIC",
+        "MSFABRIC": "FABRIC",
+        "DATABRICKS": "DATABRICKS",
+        "AWS": "AWS",
+        "AMAZON": "AWS",
+        "AZURE": "AZURE",
+        "MICROSOFT": "AZURE",
+    }
+    return mapping.get(raw)
+
+
+def _is_platform(value: Optional[str]) -> bool:
+    """Return True when the value is a platform identifier, not a source connector."""
+    canonical = _canonical_source_type(value)
+    return canonical in PLATFORM_IDENTIFIERS and canonical not in SOURCE_CONNECTOR_IDENTIFIERS
+
 
 
 def _target_source_type(target: Optional[str]) -> Optional[str]:
@@ -162,29 +196,81 @@ def _configured_source_types(client_name: str) -> set[str]:
 @router.post("/analyze")
 async def run_discovery_analyze(request: AnalyzeRequest, http_request: Request):
     """
-    Analyzes the live cloud environment or configs for a client,
-    and infers the underlying pipeline capabilities, DQ rules, and flow.
+    Analyzes the live cloud environment or configs for a client.
+
+    Architectural contract:
+      - `platform`    = execution layer (FABRIC / DATABRICKS / AWS / AZURE)
+                        Never registered as a source; never validated against configured_types.
+      - `source_type` = data-source connector (REST_API / S3 / ADLS / LOCAL)
+                        Registered by users; validated only when present and not a platform.
+
+    Valid combinations (examples):
+      FABRIC + REST_API  ✓
+      FABRIC + LOCAL     ✓
+      FABRIC + S3        ✓
+      REST_API (legacy)  ✓
+      S3 (legacy)        ✓
     """
     logger.info(f"Running live pipeline intelligence for {request.client_name}")
     try:
-        requested_source_type = _canonical_source_type(request.source_type) or _target_source_type(request.target or request.providers)
+        # ── 1. Resolve platform and source-type separately ───────────────────
+        requested_platform = _canonical_platform(request.platform)
+
+        # source_type from request; also accept target/providers as a legacy fallback.
+        requested_source_type = _canonical_source_type(request.source_type)
+        
+        # Legacy: derive source type from target/providers when no explicit source_type given
+        if not requested_source_type:
+            derived = _target_source_type(request.target or request.providers)
+            if derived:
+                requested_source_type = derived
+
+        # ── 2. Fetch configured source types for this client ──────────────────
         configured_types = _configured_source_types(request.client_name)
-        if configured_types and requested_source_type and requested_source_type not in configured_types:
+
+        # ── 3. Debug logging ──────────────────────────────────────────────────
+        logger.info(
+            "Discovery validation | platform=%s source_type=%s configured_types=%s",
+            requested_platform,
+            requested_source_type,
+            sorted(configured_types),
+        )
+
+        # ── 4. Validate ONLY the data-source connector ────────────────────────
+        # We skip validation if:
+        # a) No sources are configured yet for the client
+        # b) The requested source type is FABRIC (which is a platform, not a connector)
+        # c) The requested source type is None
+        if (
+            configured_types
+            and requested_source_type
+            and requested_source_type != "FABRIC"
+            and requested_source_type not in configured_types
+        ):
             raise HTTPException(
                 status_code=400,
-                detail=f"Discovery target {requested_source_type} is not configured for client '{request.client_name}'. Configured source types: {sorted(configured_types)}"
+                detail=(
+                    f"Discovery target '{requested_source_type}' is not configured for client "
+                    f"'{request.client_name}'. Configured source types: {sorted(configured_types)}"
+                ),
             )
 
+        # ── 5. Build the bearer token from the Authorization header ───────────
         authorization = http_request.headers.get("authorization")
         bearer_token = None
         if authorization and authorization.lower().startswith("bearer "):
             bearer_token = authorization.split(" ", 1)[1].strip()
 
-        providers = request.providers or request.target
+        # ── 6. Determine providers/target for the scanner ─────────────────────
+        # When a platform is given, use it as the scan target so the intelligence
+        # service routes to the correct scanner (fabric / aws / azure).
+        scan_target = request.target or (requested_platform.lower() if requested_platform else None)
+        providers = request.providers or scan_target
+
         result = await analyze_pipeline_live(
             client_name=request.client_name,
             providers=providers,
-            target=request.target,
+            target=scan_target,
             auth_mode=request.auth_mode,
             credentials=request.credentials,
             use_cloud_llm=request.use_cloud_llm,
