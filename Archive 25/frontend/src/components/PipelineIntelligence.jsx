@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   FiActivity, FiCheck, FiCloud, FiCpu, FiDatabase, 
   FiFile, FiFolder, FiLink, FiSearch, FiSettings, FiZap, 
@@ -196,6 +196,10 @@ export default function PipelineIntelligence({
   const [runtimePreviewError, setRuntimePreviewError] = useState(null);
   const [runtimeActionMessage, setRuntimeActionMessage] = useState(null);
   const [runtimeSaveLoading, setRuntimeSaveLoading] = useState(false);
+  const selectedWorkspaceRef = useRef(selectedWorkspace);
+  const selectedPipelineRef = useRef(selectedPipeline);
+  const runtimeCaptureRequestRef = useRef(0);
+  const runtimePreviewRequestRef = useRef(0);
 
   const configuredSourceTypes = useMemo(() => {
     const values = (clientSourceTypes || []).map((item) => String(item || '').toUpperCase()).filter(Boolean);
@@ -220,10 +224,106 @@ export default function PipelineIntelligence({
   }, [initialData]);
 
   useEffect(() => {
+    selectedWorkspaceRef.current = selectedWorkspace;
+    console.log('Current selected workspace:', selectedWorkspace?.id || null);
+  }, [selectedWorkspace]);
+
+  useEffect(() => {
+    selectedPipelineRef.current = selectedPipeline;
+  }, [selectedPipeline]);
+
+  useEffect(() => {
     if (allowedTargets.length > 0 && !allowedTargets.some(t => t.id === target)) {
       setTarget(allowedTargets[0].id);
     }
   }, [allowedTargets, target]);
+
+  useEffect(() => {
+    runtimeCaptureRequestRef.current += 1;
+    runtimePreviewRequestRef.current += 1;
+    setRuntimeAnalysis(null);
+    setRuntimePreview(null);
+    setRuntimeError(null);
+    setRuntimePreviewError(null);
+    setRuntimePermissionDetail(null);
+    setRuntimeActionMessage(null);
+    setRuntimeLoading(false);
+    setRuntimePreviewLoading(false);
+    setRuntimeSaveLoading(false);
+  }, [selectedWorkspace?.id]);
+
+  useEffect(() => {
+    runtimeCaptureRequestRef.current += 1;
+    runtimePreviewRequestRef.current += 1;
+    setRuntimeAnalysis(null);
+    setRuntimePreview(null);
+    setRuntimeError(null);
+    setRuntimePreviewError(null);
+    setRuntimePermissionDetail(null);
+    setRuntimeActionMessage(null);
+    setRuntimeLoading(false);
+    setRuntimePreviewLoading(false);
+    setRuntimeSaveLoading(false);
+  }, [selectedPipeline?.id]);
+
+  const resolveConnectionWorkspaceId = (connection = {}) => (
+    connection.workspaceId
+    || connection.workspace_id
+    || connection.workspace?.id
+    || connection.artifact?.workspaceId
+    || connection.artifact?.workspace_id
+    || null
+  );
+
+  const validateRuntimeWorkspaceSelection = (connection = {}) => {
+    const activeWorkspaceId = selectedWorkspaceRef.current?.id || null;
+    if (!activeWorkspaceId) {
+      throw new Error('Select a Fabric workspace before using the runtime source.');
+    }
+
+    const artifactWorkspaceId = resolveConnectionWorkspaceId(connection);
+    if (artifactWorkspaceId && artifactWorkspaceId !== activeWorkspaceId) {
+      throw new Error('Artifact does not belong to selected workspace');
+    }
+
+    if (!connection.artifact_id) {
+      throw new Error('Runtime source is missing an artifact ID.');
+    }
+
+    return {
+      activeWorkspaceId,
+      artifactWorkspaceId,
+    };
+  };
+
+  const buildRuntimePreviewPayload = (connection = {}, schemaDiscovery = {}) => {
+    const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(connection);
+    const payload = {
+      source_connection: {
+        ...connection,
+        workspace_id: activeWorkspaceId,
+      },
+      schema_discovery: schemaDiscovery,
+      workspaceId: activeWorkspaceId,
+      artifactId: connection.artifact_id,
+      rootFolder: connection.root_folder,
+      folderPath: connection.folder_path,
+      fileName: connection.file_name,
+      format: connection.format,
+      header: connection.header_enabled,
+      delimiter: connection.delimiter,
+    };
+
+    console.log('Runtime preview validation:', {
+      activeWorkspaceId,
+      artifactWorkspaceId,
+      artifactId: connection.artifact_id,
+      selectedPipelineId: selectedPipelineRef.current?.id || null,
+    });
+    console.log('Payload workspace:', payload.workspaceId);
+
+    return payload;
+  };
 
   const handleAnalyzePipeline = async (workspace, pipeline) => {
     if (scanInProgress || analyzing) return;
@@ -406,7 +506,9 @@ export default function PipelineIntelligence({
   };
 
   const handleRunRuntimeIntelligence = async () => {
-    if (!selectedWorkspace?.id || !selectedPipeline?.id) {
+    const activeWorkspaceId = selectedWorkspaceRef.current?.id;
+    const activePipelineId = selectedPipelineRef.current?.id;
+    if (!activeWorkspaceId || !activePipelineId) {
       setRuntimeError('Select and analyze a Fabric pipeline before running runtime capture.');
       return;
     }
@@ -415,13 +517,14 @@ export default function PipelineIntelligence({
       return;
     }
 
+    const requestId = ++runtimeCaptureRequestRef.current;
     setRuntimeLoading(true);
     setRuntimeError(null);
-      setRuntimePermissionDetail(null);
-      setRuntimeAnalysis(null);
-      setRuntimePreview(null);
-      setRuntimePreviewError(null);
-      setRuntimeActionMessage(null);
+    setRuntimePermissionDetail(null);
+    setRuntimeAnalysis(null);
+    setRuntimePreview(null);
+    setRuntimePreviewError(null);
+    setRuntimeActionMessage(null);
     try {
       const response = await fetch(apiUrl('/discovery/fabric-runtime-intelligence'), {
         method: 'POST',
@@ -431,12 +534,13 @@ export default function PipelineIntelligence({
         },
         body: JSON.stringify({
           client_name: clientName,
-          workspace_id: selectedWorkspace.id,
-          pipeline_id: selectedPipeline.id,
+          workspace_id: activeWorkspaceId,
+          pipeline_id: activePipelineId,
           existing_analysis: data || {},
         }),
       });
       const payload = await response.json();
+      if (requestId !== runtimeCaptureRequestRef.current) return;
       if (!response.ok) {
         if (payload?.detail && typeof payload.detail === 'object') {
           setRuntimePermissionDetail(payload.detail);
@@ -444,59 +548,80 @@ export default function PipelineIntelligence({
         }
         throw new Error(payload.detail || payload.message || 'Runtime intelligence capture failed.');
       }
+      if (selectedWorkspaceRef.current?.id !== activeWorkspaceId || selectedPipelineRef.current?.id !== activePipelineId) {
+        console.log('Ignoring stale runtime capture response', {
+          requestWorkspaceId: activeWorkspaceId,
+          currentWorkspaceId: selectedWorkspaceRef.current?.id || null,
+          requestPipelineId: activePipelineId,
+          currentPipelineId: selectedPipelineRef.current?.id || null,
+        });
+        return;
+      }
       setRuntimeAnalysis(payload);
     } catch (runtimeCaptureError) {
+      if (requestId !== runtimeCaptureRequestRef.current) return;
       setRuntimeError(runtimeCaptureError?.message || 'Runtime intelligence capture failed.');
     } finally {
-      setRuntimeLoading(false);
+      if (requestId === runtimeCaptureRequestRef.current) {
+        setRuntimeLoading(false);
+      }
     }
   };
 
   const handlePreviewRuntimeSource = async () => {
     if (!runtimeSourceConnection || Object.keys(runtimeSourceConnection).length === 0) return;
+    const requestId = ++runtimePreviewRequestRef.current;
     setRuntimePreviewLoading(true);
     setRuntimePreviewError(null);
     try {
+      const payloadBody = buildRuntimePreviewPayload(runtimeSourceConnection, runtimeSchemaDiscovery);
       const response = await fetch(apiUrl('/discovery/fabric-runtime-source-preview'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(fabricAccessToken ? { Authorization: `Bearer ${fabricAccessToken}` } : {}),
         },
-        body: JSON.stringify({
-          source_connection: runtimeSourceConnection,
-          schema_discovery: runtimeSchemaDiscovery,
-          workspaceId: runtimeSourceConnection.workspace_id,
-          artifactId: runtimeSourceConnection.artifact_id,
-          rootFolder: runtimeSourceConnection.root_folder,
-          folderPath: runtimeSourceConnection.folder_path,
-          fileName: runtimeSourceConnection.file_name,
-          format: runtimeSourceConnection.format,
-          header: runtimeSourceConnection.header_enabled,
-          delimiter: runtimeSourceConnection.delimiter,
-        }),
+        body: JSON.stringify(payloadBody),
       });
       const payload = await response.json();
+      if (requestId !== runtimePreviewRequestRef.current) return;
       if (!response.ok) {
         const detail = payload.detail;
         throw new Error(typeof detail === 'object' ? (detail.message || JSON.stringify(detail)) : (detail || 'Failed to preview runtime source.'));
       }
+      if (selectedWorkspaceRef.current?.id !== payloadBody.workspaceId) {
+        console.log('Ignoring stale runtime preview response', {
+          requestWorkspaceId: payloadBody.workspaceId,
+          currentWorkspaceId: selectedWorkspaceRef.current?.id || null,
+        });
+        return;
+      }
       setRuntimePreview(payload);
     } catch (previewError) {
+      if (requestId !== runtimePreviewRequestRef.current) return;
       setRuntimePreview(null);
       setRuntimePreviewError(previewError?.message || 'Failed to preview runtime source.');
     } finally {
-      setRuntimePreviewLoading(false);
+      if (requestId === runtimePreviewRequestRef.current) {
+        setRuntimePreviewLoading(false);
+      }
     }
   };
 
   const handleUseRuntimeSource = () => {
     if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) return;
+    const { activeWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
     const sourcePath = runtimeSourceConnection.full_path || runtimeSourceConnection.folder_path || runtimeSourceConnection.file_name || '';
     const sourceFormat = runtimeSourceConnection.format ? [runtimeSourceConnection.format] : (data?.file_types || []);
     const merged = {
       ...(data || {}),
-      runtime_source_discovery: runtimeDiscovery,
+      runtime_source_discovery: {
+        ...runtimeDiscovery,
+        source_connection: {
+          ...runtimeSourceConnection,
+          workspace_id: activeWorkspaceId,
+        },
+      },
       ingestion_details: {
         ...(data?.ingestion_details || {}),
         source_type: 'FABRIC',
@@ -521,13 +646,21 @@ export default function PipelineIntelligence({
     setRuntimeSaveLoading(true);
     setRuntimeActionMessage(null);
     try {
+      const { activeWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
       const response = await fetch(apiUrl('/discovery/fabric-runtime-source-save'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           client_name: clientName,
-          pipeline_id: selectedPipeline?.id,
-          runtime_source_discovery: runtimeDiscovery,
+          workspace_id: activeWorkspaceId,
+          pipeline_id: selectedPipelineRef.current?.id || null,
+          runtime_source_discovery: {
+            ...runtimeDiscovery,
+            source_connection: {
+              ...runtimeSourceConnection,
+              workspace_id: activeWorkspaceId,
+            },
+          },
         }),
       });
       const payload = await response.json();

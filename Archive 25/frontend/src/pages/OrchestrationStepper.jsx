@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useApi, apiUrl } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
@@ -87,6 +87,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [deploymentPackage, setDeploymentPackage] = useState(null);
   const [selectedWorkspace, setSelectedWorkspace] = useState(null);
   const [selectedPipeline, setSelectedPipeline] = useState(null);
+  const selectedWorkspaceRef = useRef(null);
 
   // Source form state
   const [sourceForm, setSourceForm] = useState({
@@ -153,6 +154,50 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     }
   }
 
+  function resetWorkspaceScopedState() {
+    setIntelligenceData(null);
+    setConfigPersisted(false);
+    setDatasets([]);
+    setOrchestrateResp(null);
+    setEditingConfigDataset(null);
+    setEditingConfigColumns([]);
+    setSelectedDqDataset(null);
+    setDqError(null);
+    setSelectedSources([]);
+    setPipelineDeployed(false);
+    setDeploymentStrategy(null);
+    setDeploymentPackage(null);
+    setExtractedFabricData(null);
+  }
+
+  function handleWorkspaceSelection(workspace) {
+    const previousWorkspaceId = selectedWorkspaceRef.current?.id || null;
+    const nextWorkspaceId = workspace?.id || null;
+    console.log('STEPPER: Workspace selection change', {
+      previousWorkspaceId,
+      nextWorkspaceId,
+    });
+
+    selectedWorkspaceRef.current = workspace || null;
+    setSelectedWorkspace(workspace || null);
+
+    if (previousWorkspaceId !== nextWorkspaceId) {
+      setSelectedPipeline(null);
+      resetWorkspaceScopedState();
+    }
+  }
+
+  function handlePipelineSelection(pipeline) {
+    const previousPipelineId = selectedPipeline?.id || null;
+    const nextPipelineId = pipeline?.id || null;
+    console.log('STEPPER: Pipeline selection change', {
+      workspaceId: selectedWorkspaceRef.current?.id || null,
+      previousPipelineId,
+      nextPipelineId,
+    });
+    setSelectedPipeline(pipeline || null);
+  }
+
   // ----- API FUNCTIONS -----
   useEffect(() => { fetchClients(); }, []);
 
@@ -177,6 +222,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       fetchClientSourceTypes(selectedClient);
     } else { setApiSources([]); setSelectedApiSource(null); setSelectedEndpoint(''); }
   }, [selectedClient]);
+
+  useEffect(() => {
+    selectedWorkspaceRef.current = selectedWorkspace;
+  }, [selectedWorkspace]);
 
   async function fetchClientSourceTypes(client) {
     try {
@@ -936,9 +985,9 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   fabricMode={sourceForm.fabricMode}
                   selectedPlatform={selectedPlatform}
                   selectedWorkspace={selectedWorkspace}
-                  setSelectedWorkspace={setSelectedWorkspace}
+                  setSelectedWorkspace={handleWorkspaceSelection}
                   selectedPipeline={selectedPipeline}
-                  setSelectedPipeline={setSelectedPipeline}
+                  setSelectedPipeline={handlePipelineSelection}
                   onScanComplete={(data) => {
                     console.log("STEPPER: Intelligence scan completed", data);
                     // Discovered assets will be managed inside PipelineIntelligence
