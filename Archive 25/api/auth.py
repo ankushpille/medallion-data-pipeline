@@ -1,6 +1,7 @@
 import json
 import secrets
 import time
+import base64
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
@@ -16,6 +17,16 @@ router = APIRouter(tags=["Auth"])
 _AUTH_FLOW_TTL_SECONDS = 600
 _auth_flows: Dict[str, Dict[str, Any]] = {}
 _auth_results: Dict[str, Dict[str, Any]] = {}
+_MSAL_RESERVED_SCOPES = {"openid", "profile", "offline_access"}
+_FABRIC_REQUIRED_EXECUTION_SCOPES = {
+    "Item.Execute.All",
+    "Item.ReadWrite.All",
+    "Workspace.ReadWrite.All",
+}
+_FABRIC_OPTIONAL_EXECUTION_SCOPES = {
+    "DataPipeline.ReadWrite.All",
+    "DataPipeline.Execute.All",
+}
 
 
 def _popup_message_html(origin: str, payload: Dict[str, Any], status_code: int = 200) -> HTMLResponse:
@@ -66,7 +77,89 @@ def _redirect_uri(request: Request) -> str:
 
 def _scopes_for(target: str) -> List[str]:
     raw = settings.AZURE_SSO_SCOPES_FABRIC if target == "fabric" else settings.AZURE_SSO_SCOPES_AZURE
-    return [scope.strip() for scope in (raw or "").split(",") if scope.strip()]
+    scopes: List[str] = []
+    removed: List[str] = []
+    seen = set()
+    for scope in (raw or "").split(","):
+        value = scope.strip()
+        if not value:
+            continue
+        if value.lower() in _MSAL_RESERVED_SCOPES:
+            removed.append(value)
+            continue
+        if value not in seen:
+            scopes.append(value)
+            seen.add(value)
+    if removed:
+        logger.warning(
+            "Ignoring reserved MSAL scopes for target '{}': {}",
+            target,
+            ", ".join(removed),
+        )
+    return scopes
+
+
+def _base_scope_name(scope: str) -> str:
+    value = (scope or "").strip()
+    if not value:
+        return value
+    if "/" in value:
+        return value.rsplit("/", 1)[-1]
+    return value
+
+
+def _decode_jwt_unverified(token: str) -> Dict[str, Any]:
+    parts = (token or "").split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        data = json.loads(decoded.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _token_validation(access_token: str, target: str) -> Dict[str, Any]:
+    claims = _decode_jwt_unverified(access_token)
+    scopes = sorted({_base_scope_name(scope) for scope in str(claims.get("scp") or "").split(" ") if scope.strip()})
+    roles = claims.get("roles") if isinstance(claims.get("roles"), list) else []
+    aud = claims.get("aud")
+    tenant = claims.get("tid")
+    exp = claims.get("exp")
+    now = int(time.time())
+    expired = bool(exp and int(exp) <= now)
+
+    required_scopes = sorted(_FABRIC_REQUIRED_EXECUTION_SCOPES) if target == "fabric" else []
+    optional_scopes = sorted(_FABRIC_OPTIONAL_EXECUTION_SCOPES) if target == "fabric" else []
+    missing_scopes = [scope for scope in required_scopes if scope not in scopes]
+
+    return {
+        "target": target,
+        "aud": aud,
+        "tenant": tenant,
+        "exp": exp,
+        "expired": expired,
+        "scp": scopes,
+        "roles": roles,
+        "required_scopes": required_scopes,
+        "optional_scopes": optional_scopes,
+        "missing_scopes": missing_scopes,
+        "has_required_scopes": not missing_scopes and aud == "https://api.fabric.microsoft.com",
+    }
+
+
+def _fabric_admin_instructions(validation: Dict[str, Any]) -> str:
+    required = validation.get("required_scopes") or sorted(_FABRIC_REQUIRED_EXECUTION_SCOPES)
+    lines = [
+        "Please grant delegated Microsoft Fabric API permissions:",
+        *[f"- {scope}" for scope in required],
+        "",
+        "Then provide admin consent for the app registration.",
+    ]
+    return "\n".join(lines)
 
 
 def _frontend_origin(origin: str) -> str:
@@ -280,6 +373,8 @@ async def get_a_token(request: Request):
         "target": stored["target"],
         "accessToken": access_token,
         "expiresOn": str(result.get("expires_on", "")),
+        "tokenValidation": _token_validation(access_token, stored["target"]),
+        "adminInstructions": _fabric_admin_instructions(_token_validation(access_token, stored["target"])) if stored["target"] == "fabric" else "",
         "account": {
             "username": str(account.get("preferred_username") or account.get("email") or ""),
             "name": str(account.get("name") or ""),

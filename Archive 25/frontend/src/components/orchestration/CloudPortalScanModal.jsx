@@ -49,6 +49,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
     fabric_local_session_supported: true,
     fabric_requires_token_or_app_registration: false,
   });
+  const [fabricTokenValidation, setFabricTokenValidation] = useState(null);
 
   const apiOrigin = useMemo(() => {
     try {
@@ -98,6 +99,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
       setError('');
       setSsoAccount(payload.account || null);
       setAuthRequestId('');
+      if (payload.target === 'fabric') setFabricTokenValidation(payload.tokenValidation || null);
       setCredentials((prev) => ({
         ...prev,
         [payload.target]: {
@@ -131,6 +133,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
 
         setError('');
         setSsoAccount(payload.account || null);
+        if (payload.target === 'fabric') setFabricTokenValidation(payload.tokenValidation || null);
         setCredentials((prev) => ({
           ...prev,
           [payload.target]: {
@@ -285,6 +288,10 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
         throw new Error(message);
       }
       const data = await response.json();
+      if (target === 'fabric' && headers.Authorization) {
+        data.__fabric_access_token = headers.Authorization.replace(/^Bearer\s+/i, '');
+        data.__fabric_token_validation = fabricTokenValidation;
+      }
       onScanComplete(data);
       setCredentials(EMPTY_CREDS);
       setSsoAccount(null);
@@ -381,6 +388,21 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
               </div>
               {ssoAccount?.username && (
                 <div className="step-sub">Connected as {ssoAccount.name || ssoAccount.username}.</div>
+              )}
+              {fabricTokenValidation && (
+                <div className="pi-alert warning" style={{ marginTop: 12 }}>
+                  <div><strong>Audience:</strong> {fabricTokenValidation.aud || 'Unavailable'}</div>
+                  <div><strong>Current scopes:</strong> {(fabricTokenValidation.scp || []).join(', ') || 'None'}</div>
+                  <div><strong>Required scopes:</strong> {(fabricTokenValidation.required_scopes || []).join(', ') || 'None'}</div>
+                  {!!(fabricTokenValidation.missing_scopes || []).length && (
+                    <div><strong>Missing scopes:</strong> {(fabricTokenValidation.missing_scopes || []).join(', ')}</div>
+                  )}
+                  {!!(fabricTokenValidation.missing_scopes || []).length && (
+                    <div style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>
+                      {`Please grant delegated Microsoft Fabric API permissions:\n- Workspace.ReadWrite.All\n- Item.ReadWrite.All\n- Item.Execute.All\n\nThen provide admin consent.`}
+                    </div>
+                  )}
+                </div>
               )}
               <CredentialInput label="Demo SSO Token" type="password" value={credentials.fabric.sso_token} onChange={(v) => updateCredential('sso_token', v)} />
             </div>

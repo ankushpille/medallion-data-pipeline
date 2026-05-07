@@ -4,6 +4,7 @@ import asyncio
 import base64
 from fastapi import HTTPException
 import logging
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
@@ -21,6 +22,76 @@ class FabricPipelineService:
             resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items?type=DataPipeline", headers=self.headers)
             resp.raise_for_status()
             return resp.json().get("value", [])
+
+    async def get_pipeline(self, workspace_id: str, pipeline_id: str) -> Dict[str, Any]:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}", headers=self.headers)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def run_pipeline(self, workspace_id: str, pipeline_id: str, pipeline_name: Optional[str] = None, owner_upn: Optional[str] = None, owner_object_id: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"executionData": {}}
+        if pipeline_name:
+            payload["executionData"]["pipelineName"] = pipeline_name
+        if owner_upn:
+            payload["executionData"]["OwnerUserPrincipalName"] = owner_upn
+        if owner_object_id:
+            payload["executionData"]["OwnerUserObjectId"] = owner_object_id
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/jobs/instances?jobType=Pipeline",
+                headers=self.headers,
+                json=payload,
+            )
+            if resp.status_code not in (200, 201, 202):
+                raise HTTPException(status_code=resp.status_code, detail=f"Pipeline execution failed: {resp.text}")
+            location = resp.headers.get("Location", "")
+            job_instance_id = location.rstrip("/").split("/")[-1] if location else None
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            return {
+                "job_instance_id": job_instance_id or body.get("id"),
+                "location": location,
+                "body": body,
+                "status_code": resp.status_code,
+            }
+
+    async def get_pipeline_job_instance(self, workspace_id: str, pipeline_id: str, job_instance_id: str) -> Dict[str, Any]:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/jobs/instances/{job_instance_id}",
+                headers=self.headers,
+            )
+            if not resp.is_success:
+                raise HTTPException(status_code=resp.status_code, detail=f"Get pipeline job instance failed: {resp.text}")
+            return resp.json()
+
+    async def query_activity_runs(
+        self,
+        workspace_id: str,
+        job_instance_id: str,
+        last_updated_after: str,
+        last_updated_before: str,
+    ) -> List[Dict[str, Any]]:
+        payload = {
+            "filters": [],
+            "orderBy": [{"orderBy": "ActivityRunStart", "order": "ASC"}],
+            "lastUpdatedAfter": last_updated_after,
+            "lastUpdatedBefore": last_updated_before,
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/datapipelines/pipelineruns/{job_instance_id}/queryactivityruns",
+                headers=self.headers,
+                json=payload,
+            )
+            if not resp.is_success:
+                raise HTTPException(status_code=resp.status_code, detail=f"Query activity runs failed: {resp.text}")
+            body = resp.json()
+            return body if isinstance(body, list) else body.get("value", [])
 
     async def bulk_export_definitions(self, workspace_id: str, pipeline_ids: list):
         """Polls LRO and returns a dict of {pipeline_id: {filename: content}}"""

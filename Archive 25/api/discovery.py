@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form, Depends
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import logging
@@ -6,8 +6,15 @@ import json
 import urllib.request
 import urllib.error
 import base64
+from datetime import datetime
+from sqlalchemy.orm import Session
 from services.pipeline_intelligence_service import analyze_pipeline_live
+from services.fabric_bundle_analysis_service import analyze_fabric_bundle
+from services.fabric_runtime_intelligence_service import execute_and_capture_runtime_intelligence
+from services.fabric.universal_preview_service import FabricUniversalPreviewService
+from api.storage import preview_file
 from core.database import SessionLocal
+from core.database import get_db
 from core.utils import generate_dataset_id
 from models.api_source_config import APISourceConfig
 from models.master_config_authoritative import MasterConfigAuthoritative
@@ -37,6 +44,420 @@ class AnalyzeRequest(BaseModel):
 class ApiScanRequest(BaseModel):
     client_name: str
     source_name: Optional[str] = None
+
+
+class RuntimeIntelligenceRequest(BaseModel):
+    client_name: str
+    workspace_id: str
+    pipeline_id: str
+    existing_analysis: Optional[Dict[str, Any]] = None
+
+
+class RuntimeSourcePreviewRequest(BaseModel):
+    source_connection: Optional[Dict[str, Any]] = None
+    schema_discovery: Optional[Dict[str, Any]] = None
+    workspaceId: Optional[str] = None
+    artifactId: Optional[str] = None
+    rootFolder: Optional[str] = None
+    folderPath: Optional[str] = None
+    fileName: Optional[str] = None
+    format: Optional[str] = None
+    header: Optional[bool] = None
+    delimiter: Optional[str] = None
+
+
+class RuntimeSourceSaveRequest(BaseModel):
+    client_name: str
+    pipeline_id: Optional[str] = None
+    runtime_source_discovery: Dict[str, Any]
+
+
+def _runtime_source_path(source_connection: Dict[str, Any]) -> str:
+    return (
+        source_connection.get("preview_path")
+        or source_connection.get("resolved_path")
+        or source_connection.get("full_path")
+        or "/".join(
+            part.strip("/")
+            for part in [str(source_connection.get("folder_path") or "").strip("/"), str(source_connection.get("file_name") or "").strip("/")]
+            if part
+        )
+    )
+
+
+def _runtime_dataset_name(source_connection: Dict[str, Any]) -> str:
+    return (
+        source_connection.get("file_name")
+        or source_connection.get("folder_path")
+        or source_connection.get("artifact_id")
+        or "fabric_runtime_source"
+    )
+
+
+def _normalize_preview_source(request: RuntimeSourcePreviewRequest) -> Dict[str, Any]:
+    source_connection = dict(request.source_connection or {})
+    if request.workspaceId:
+        source_connection.setdefault("workspace_id", request.workspaceId)
+    if request.artifactId:
+        source_connection.setdefault("artifact_id", request.artifactId)
+    if request.rootFolder:
+        source_connection.setdefault("root_folder", request.rootFolder)
+    if request.folderPath:
+        source_connection.setdefault("folder_path", request.folderPath)
+    if request.fileName:
+        source_connection.setdefault("file_name", request.fileName)
+    if request.format:
+        source_connection.setdefault("format", str(request.format).lower())
+    if request.header is not None:
+        source_connection.setdefault("header_enabled", request.header)
+    if request.delimiter:
+        source_connection.setdefault("delimiter", request.delimiter)
+    if not source_connection.get("resolved_path"):
+        root = str(source_connection.get("root_folder") or "Files").strip("/\\") or "Files"
+        folder = str(source_connection.get("folder_path") or "").strip("/\\")
+        file_name = str(source_connection.get("file_name") or "").strip("/\\")
+        parts = [root]
+        if folder:
+            parts.append(folder)
+        if file_name:
+            parts.append(file_name)
+        source_connection["resolved_path"] = "/".join(part for part in parts if part)
+    return source_connection
+
+
+def _structured_runtime_sample_preview(source_connection: Dict[str, Any], schema_discovery: Dict[str, Any], diagnostics: List[Dict[str, Any]]) -> Dict[str, Any]:
+    sample_rows = schema_discovery.get("sample_rows") or []
+    columns = schema_discovery.get("columns") or []
+    column_names = [column.get("column_name") for column in columns if column.get("column_name")]
+    schema = [
+        {
+            "column_name": column.get("column_name"),
+            "data_type": column.get("data_type"),
+            "nullable": column.get("nullable"),
+            "ordinal_position": column.get("ordinal_position"),
+        }
+        for column in columns
+    ]
+    preview_rows = []
+    for row in sample_rows[:25]:
+        if isinstance(row, dict):
+            preview_rows.append({column: row.get(column) for column in column_names})
+    return {
+        "type": "csv",
+        "preview_rows": preview_rows,
+        "rows": [[row.get(column) for column in column_names] for row in preview_rows],
+        "schema": schema,
+        "row_count_estimate": len(sample_rows),
+        "total_rows_approx": "Runtime metadata sample",
+        "columns": column_names,
+        "datatypes": [column.get("data_type") for column in columns],
+        "resolved_path": source_connection.get("resolved_path"),
+        "preview_mode": "runtime_sample",
+        "source_name": _runtime_dataset_name(source_connection),
+        "diagnostics": diagnostics,
+    }
+
+
+@router.post("/fabric-bundle-analysis")
+async def run_fabric_bundle_analysis(
+    http_request: Request,
+    client_name: str = Form(...),
+    workspace_id: Optional[str] = Form(None),
+    pipeline_id: Optional[str] = Form(None),
+    use_cloud_llm: bool = Form(True),
+    existing_analysis_json: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Only Microsoft Fabric exported ZIP bundles are supported.")
+
+    try:
+        existing_analysis = json.loads(existing_analysis_json) if existing_analysis_json else None
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"existing_analysis_json is not valid JSON: {exc}")
+
+    authorization = http_request.headers.get("authorization")
+    bearer_token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
+
+    try:
+        payload = await analyze_fabric_bundle(
+            client_name=client_name,
+            file_bytes=await file.read(),
+            filename=file.filename or "fabric-export.zip",
+            workspace_id=workspace_id,
+            pipeline_id=pipeline_id,
+            use_cloud_llm=use_cloud_llm,
+            authorization_token=bearer_token,
+            existing_analysis=existing_analysis,
+        )
+        return payload
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Fabric bundle analysis failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/fabric-runtime-intelligence")
+async def run_fabric_runtime_intelligence(request: RuntimeIntelligenceRequest, http_request: Request):
+    authorization = http_request.headers.get("authorization")
+    bearer_token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
+    if not bearer_token:
+        raise HTTPException(status_code=401, detail="Fabric runtime capture requires a bearer token.")
+
+    try:
+        return await execute_and_capture_runtime_intelligence(
+            client_name=request.client_name,
+            workspace_id=request.workspace_id,
+            pipeline_id=request.pipeline_id,
+            access_token=bearer_token,
+            existing_analysis=request.existing_analysis,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Fabric runtime intelligence failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/fabric-runtime-source-preview")
+async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_request: Request, db: Session = Depends(get_db)):
+    source_connection = _normalize_preview_source(request)
+    schema_discovery = request.schema_discovery or {}
+    source_path = _runtime_source_path(source_connection)
+    diagnostics: List[Dict[str, Any]] = []
+    authorization = http_request.headers.get("authorization")
+    bearer_token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
+
+    diagnostics.append({
+        "mode": "metadata_resolution",
+        "status": "success" if source_connection.get("workspace_id") or source_connection.get("artifact_id") else "partial",
+        "workspace_id": source_connection.get("workspace_id"),
+        "artifact_id": source_connection.get("artifact_id"),
+        "root_folder": source_connection.get("root_folder"),
+        "folder_path": source_connection.get("folder_path"),
+        "file_name": source_connection.get("file_name"),
+        "resolved_path": source_connection.get("resolved_path"),
+    })
+
+    if bearer_token and source_connection.get("workspace_id"):
+        diagnostics.append({
+            "mode": "spark_notebook",
+            "status": "attempted",
+            "workspace_id": source_connection.get("workspace_id"),
+            "resolved_path": source_connection.get("resolved_path"),
+            "preview_strategy": source_connection.get("preview_strategy"),
+        })
+        try:
+            resolved_source = {
+                "source_type": source_connection.get("storage_type") or source_connection.get("source_type"),
+                "connector_type": source_connection.get("connector_type"),
+                "format": source_connection.get("format"),
+                "connection_metadata": source_connection.get("connection_metadata") or {},
+                "runtime_metadata": source_connection.get("runtime_metadata") or {},
+                "preview_strategy": source_connection.get("preview_strategy"),
+                "read_options": {
+                    "header": source_connection.get("header_enabled"),
+                    "delimiter": source_connection.get("delimiter"),
+                    "quote": source_connection.get("quote_char"),
+                    "escape": source_connection.get("escape_char"),
+                },
+            }
+            universal_request = {
+                "resolved_source": resolved_source,
+                "runtime_statistics": {},
+            }
+            preview_service = FabricUniversalPreviewService(bearer_token)
+            notebook_preview = await preview_service.execute_preview(
+                workspace_id=source_connection.get("workspace_id"),
+                preview_request=universal_request,
+            )
+            for item in notebook_preview.get("notebook_diagnostics") or []:
+                diagnostics.append({
+                    "mode": "spark_notebook_lifecycle",
+                    **item,
+                })
+            if notebook_preview.get("preview_error"):
+                diagnostics.append({
+                    "mode": "spark_notebook",
+                    "status": "failed",
+                    "error": notebook_preview.get("preview_error"),
+                    "resolved_path": notebook_preview.get("resolved_path") or source_connection.get("resolved_path"),
+                })
+                provisioning_detail = notebook_preview.get("provisioning_detail")
+                if isinstance(provisioning_detail, dict):
+                    diagnostics.append({
+                        "mode": "spark_notebook_provisioning",
+                        **{k: v for k, v in provisioning_detail.items() if k != "notebook_diagnostics"},
+                    })
+            else:
+                diagnostics.append({
+                    "mode": "spark_notebook",
+                    "status": "success",
+                    "preview_strategy": notebook_preview.get("preview_strategy"),
+                    "resolved_path": notebook_preview.get("resolved_path"),
+                })
+                notebook_preview["preview_mode"] = "spark_notebook"
+                notebook_preview["diagnostics"] = diagnostics
+                notebook_preview["source_name"] = _runtime_dataset_name(source_connection)
+                notebook_preview["resolved_source"] = notebook_preview.get("resolved_source") or universal_request.get("resolved_source")
+                return notebook_preview
+        except Exception as exc:
+            diagnostics.append({
+                "mode": "spark_notebook",
+                "status": "failed",
+                "error": str(exc),
+                "resolved_path": source_connection.get("resolved_path"),
+            })
+    else:
+        diagnostics.append({
+            "mode": "spark_notebook",
+            "status": "skipped",
+            "reason": "Fabric bearer token or workspace id was not provided for notebook execution.",
+        })
+
+    if source_path.startswith(("az://", "s3://", "https://")):
+        diagnostics.append({
+            "mode": "filesystem",
+            "status": "attempted",
+            "path": source_path,
+        })
+        try:
+            payload = preview_file(path=source_path, db=db)
+            rows = payload.get("rows") or []
+            columns = payload.get("columns") or []
+            return {
+                **payload,
+                "preview_rows": [
+                    {column: row[index] if isinstance(row, list) and index < len(row) else None for index, column in enumerate(columns)}
+                    for row in rows[:25]
+                ] if columns and rows else [],
+                "schema": schema_discovery.get("columns") or [],
+                "row_count_estimate": len(rows),
+                "resolved_path": source_connection.get("resolved_path") or source_path,
+                "preview_mode": "filesystem",
+                "source_name": _runtime_dataset_name(source_connection),
+                "diagnostics": diagnostics,
+            }
+        except Exception as exc:
+            diagnostics.append({
+                "mode": "filesystem",
+                "status": "failed",
+                "path": source_path,
+                "error": str(exc),
+            })
+    else:
+        diagnostics.append({
+            "mode": "filesystem",
+            "status": "skipped",
+            "reason": "Resolved path is not an absolute storage URI.",
+            "path": source_path,
+        })
+
+    diagnostics.append({
+        "mode": "spark",
+        "status": "unavailable",
+        "path": source_connection.get("resolved_path"),
+        "reason": "Spark preview fallback outside notebook execution is not configured in this backend session.",
+    })
+    diagnostics.append({
+        "mode": "lakehouse_sql",
+        "status": "unavailable",
+        "artifact_id": source_connection.get("artifact_id"),
+        "reason": "Lakehouse SQL preview is not configured in this backend session.",
+    })
+    diagnostics.append({
+        "mode": "onelake_filesystem",
+        "status": "unavailable",
+        "path": source_connection.get("resolved_path"),
+        "reason": "OneLake filesystem preview is not configured in this backend session.",
+    })
+
+    sample_preview = _structured_runtime_sample_preview(source_connection, schema_discovery, diagnostics)
+    if sample_preview.get("preview_rows"):
+        return sample_preview
+
+    raise HTTPException(status_code=400, detail={
+        "message": "Runtime source preview could not access the physical Lakehouse file and no runtime sample rows were available.",
+        "lakehouse_metadata_found": bool(source_connection.get("workspace_id") or source_connection.get("artifact_id")),
+        "resolved_path": source_connection.get("resolved_path"),
+        "preview_mode_attempted": list(dict.fromkeys(item.get("mode") for item in diagnostics if item.get("mode"))),
+        "diagnostics": diagnostics,
+    })
+
+
+@router.post("/fabric-runtime-source-save")
+def save_runtime_source(request: RuntimeSourceSaveRequest, db: Session = Depends(get_db)):
+    runtime_source_discovery = request.runtime_source_discovery or {}
+    source_connection = runtime_source_discovery.get("source_connection") or {}
+    target_connection = runtime_source_discovery.get("target_connection") or {}
+    schema_discovery = runtime_source_discovery.get("schema_discovery") or {}
+    dq_recommendations = runtime_source_discovery.get("dq_recommendations") or []
+    runtime_statistics = runtime_source_discovery.get("runtime_statistics") or {}
+
+    source_path = _runtime_source_path(source_connection)
+    if not source_path:
+        source_path = f"fabric://{source_connection.get('workspace_id') or 'workspace'}/{source_connection.get('artifact_id') or _runtime_dataset_name(source_connection)}"
+
+    source_type = str(source_connection.get("storage_type") or source_connection.get("source_type") or "FABRIC").upper()
+    dataset_id = generate_dataset_id(request.client_name, source_type, source_path)
+    source_object = _runtime_dataset_name(source_connection)
+    file_format = source_connection.get("format") or target_connection.get("format") or "UNKNOWN"
+
+    authoritative = db.query(MasterConfigAuthoritative).filter(MasterConfigAuthoritative.dataset_id == dataset_id).first()
+    if not authoritative:
+        authoritative = MasterConfigAuthoritative(dataset_id=dataset_id)
+        db.add(authoritative)
+    authoritative.pipeline_id = request.pipeline_id
+    authoritative.client_name = request.client_name
+    authoritative.source_type = source_type
+    authoritative.source_folder = source_connection.get("folder_path") or source_path
+    authoritative.source_object = source_object
+    authoritative.file_format = file_format
+    authoritative.raw_layer_path = source_path
+    authoritative.target_layer_bronze = target_connection.get("folder_path") or target_connection.get("full_path")
+    authoritative.is_active = True
+    authoritative.updated_at = datetime.utcnow()
+
+    legacy = db.query(MasterConfig).filter(MasterConfig.dataset_id == dataset_id).first()
+    if not legacy:
+        legacy = MasterConfig(dataset_id=dataset_id)
+        db.add(legacy)
+    legacy.client_name = request.client_name
+    legacy.source_system = source_type
+    legacy.source_object = source_object
+    legacy.source_schema = source_connection.get("folder_path")
+    legacy.file_format = file_format
+    legacy.target_schema = target_connection.get("folder_path")
+    legacy.target_table = target_connection.get("file_name")
+    legacy.is_active = True
+    legacy.validation_rules = {
+        "schema": schema_discovery,
+        "dq_rules": dq_recommendations,
+        "runtime_metrics": runtime_statistics,
+        "source_connection": source_connection,
+        "target_connection": target_connection,
+    }
+    legacy.rows_read = runtime_statistics.get("rows_read") or 0
+    legacy.rows_written = runtime_statistics.get("rows_written") or 0
+    legacy.updated_at = datetime.utcnow()
+
+    db.commit()
+    return {
+        "status": "SUCCESS",
+        "dataset_id": dataset_id,
+        "source_path": source_path,
+        "source_object": source_object,
+        "file_format": file_format,
+    }
 
 
 def _api_headers(config: APISourceConfig) -> Dict[str, str]:

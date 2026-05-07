@@ -36,7 +36,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AZURE_REDIRECT_URI", "REDIRECT_URI", "azure_redirect_uri"),
     )
     AZURE_SSO_SCOPES_AZURE: Optional[str] = "https://management.azure.com/user_impersonation"
-    AZURE_SSO_SCOPES_FABRIC: Optional[str] = "https://api.fabric.microsoft.com/.default"
+    AZURE_SSO_SCOPES_FABRIC: Optional[str] = (
+        "https://api.fabric.microsoft.com/Workspace.ReadWrite.All,"
+        "https://api.fabric.microsoft.com/Item.ReadWrite.All,"
+        "https://api.fabric.microsoft.com/Item.Execute.All,"
+        "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All,"
+        "https://api.fabric.microsoft.com/DataPipeline.Execute.All"
+    )
     AZURE_ENABLE_LOCAL_SESSION_FALLBACK: bool = True
     FABRIC_ENABLE_LOCAL_SESSION_FALLBACK: bool = False
     AZURE_OPENAI_API_KEY: Optional[str] = Field(
