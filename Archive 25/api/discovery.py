@@ -6,12 +6,16 @@ import json
 import urllib.request
 import urllib.error
 import base64
+from io import BytesIO
 from datetime import datetime
 from sqlalchemy.orm import Session
+import pandas as pd
+import httpx
 from services.pipeline_intelligence_service import analyze_pipeline_live
 from services.fabric_bundle_analysis_service import analyze_fabric_bundle
 from services.fabric_runtime_intelligence_service import execute_and_capture_runtime_intelligence
 from services.fabric.universal_preview_service import FabricUniversalPreviewService
+from services.fabric.auth_service import FabricAuthService, ONELAKE_STORAGE_SCOPE
 from api.storage import preview_file
 from core.database import SessionLocal
 from core.database import get_db
@@ -92,6 +96,291 @@ def _runtime_dataset_name(source_connection: Dict[str, Any]) -> str:
         or source_connection.get("artifact_id")
         or "fabric_runtime_source"
     )
+
+
+def _decode_token_audience(token: Optional[str]) -> Optional[str]:
+    if not token or token.count(".") < 2:
+        return None
+    try:
+        payload = token.split(".")[1]
+        padding = "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding).decode("utf-8"))
+        return claims.get("aud")
+    except Exception:
+        return None
+
+
+def _normalize_preview_strategy(source_connection: Dict[str, Any]) -> str:
+    source_type = str(source_connection.get("source_type") or source_connection.get("storage_type") or "").lower()
+    connector_type = str(source_connection.get("connector_type") or "").lower()
+    format_type = str(source_connection.get("format") or "").lower()
+    resolved_path = str(source_connection.get("resolved_path") or "").lower()
+    metadata = source_connection.get("connection_metadata") or {}
+
+    if any(token in connector_type for token in ("rest", "http", "graphql", "soap")) or any(key in metadata for key in ("endpoint", "url")):
+        return "api_preview"
+    if any(token in connector_type for token in ("sql", "jdbc", "oracle", "mysql", "postgres", "snowflake", "db2")) or any(key in metadata for key in ("jdbc_url", "connectionString", "table", "query")):
+        return "sql_preview"
+    if format_type in {"csv", "txt", "tsv"} or "delimited" in connector_type:
+        return "direct_csv"
+    if format_type == "json":
+        return "direct_json"
+    if format_type == "parquet":
+        return "parquet_preview"
+    if format_type == "delta":
+        return "delta_preview"
+    if resolved_path.startswith(("s3://", "az://", "https://", "abfss://", "abfs://", "wasbs://")):
+        return "direct_file"
+    if "lakehouse" in source_type or "onelake" in source_type:
+        return "onelake_direct"
+    return "spark_fallback"
+
+
+def _is_lightweight_preview_strategy(strategy: str, source_connection: Dict[str, Any]) -> bool:
+    format_type = str(source_connection.get("format") or "").lower()
+    return strategy in {"direct_csv", "direct_json", "onelake_direct"} or (
+        strategy == "direct_file" and format_type in {"csv", "txt", "tsv", "json"}
+    )
+
+
+def _schema_from_dataframe(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    schema: List[Dict[str, Any]] = []
+    for index, column in enumerate(df.columns):
+        dtype = str(df[column].dtype)
+        schema.append({
+            "column_name": str(column),
+            "data_type": dtype,
+            "nullable": bool(df[column].isnull().any()),
+            "ordinal_position": index + 1,
+        })
+    return schema
+
+
+def _preview_payload_from_dataframe(df: pd.DataFrame, resolved_path: str, preview_mode: str, source_name: str) -> Dict[str, Any]:
+    normalized = df.head(25).copy()
+    normalized = normalized.where(pd.notnull(normalized), None)
+    preview_rows = normalized.to_dict(orient="records")
+    schema = _schema_from_dataframe(normalized)
+    return {
+        "type": "csv",
+        "preview_rows": preview_rows,
+        "rows": [[row.get(column["column_name"]) for column in schema] for row in preview_rows],
+        "schema": schema,
+        "row_count_estimate": len(preview_rows),
+        "total_rows_approx": f"First {len(preview_rows)} rows shown",
+        "columns": [column["column_name"] for column in schema],
+        "datatypes": [column["data_type"] for column in schema],
+        "nullable_columns": [column["column_name"] for column in schema if column["nullable"]],
+        "resolved_path": resolved_path,
+        "preview_mode": preview_mode,
+        "source_name": source_name,
+    }
+
+
+def _direct_preview_from_bytes(content: bytes, source_connection: Dict[str, Any], resolved_path: str, preview_mode: str) -> Dict[str, Any]:
+    format_type = str(source_connection.get("format") or "").lower()
+    delimiter = source_connection.get("delimiter") or ","
+    header = source_connection.get("header_enabled")
+
+    if preview_mode in {"direct_csv", "direct_file"} or format_type in {"csv", "txt", "tsv"}:
+        read_kwargs: Dict[str, Any] = {"nrows": 25, "sep": delimiter}
+        if header is False:
+            read_kwargs["header"] = None
+        df = pd.read_csv(BytesIO(content), **read_kwargs)
+        return _preview_payload_from_dataframe(df, resolved_path, preview_mode, _runtime_dataset_name(source_connection))
+    if preview_mode == "direct_json" or format_type == "json":
+        payload = json.loads(content.decode("utf-8"))
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            df = pd.DataFrame(payload[:25])
+            return _preview_payload_from_dataframe(df, resolved_path, preview_mode, _runtime_dataset_name(source_connection))
+        if isinstance(payload, dict):
+            df = pd.DataFrame([payload])
+            return _preview_payload_from_dataframe(df, resolved_path, preview_mode, _runtime_dataset_name(source_connection))
+        return {
+            "type": "json",
+            "preview_rows": [{"value": payload}],
+            "rows": [[payload]],
+            "schema": [{"column_name": "value", "data_type": type(payload).__name__, "nullable": payload is None, "ordinal_position": 1}],
+            "row_count_estimate": 1,
+            "columns": ["value"],
+            "datatypes": [type(payload).__name__],
+            "nullable_columns": ["value"] if payload is None else [],
+            "resolved_path": resolved_path,
+            "preview_mode": preview_mode,
+            "source_name": _runtime_dataset_name(source_connection),
+        }
+    if preview_mode == "parquet_preview" or format_type == "parquet":
+        df = pd.read_parquet(BytesIO(content)).head(25)
+        return _preview_payload_from_dataframe(df, resolved_path, preview_mode, _runtime_dataset_name(source_connection))
+    return {
+        "type": "text",
+        "preview_rows": [{"value": content.decode("utf-8", errors="ignore")[:5000]}],
+        "rows": [[content.decode("utf-8", errors="ignore")[:5000]]],
+        "schema": [{"column_name": "value", "data_type": "text", "nullable": False, "ordinal_position": 1}],
+        "row_count_estimate": 1,
+        "columns": ["value"],
+        "datatypes": ["text"],
+        "nullable_columns": [],
+        "resolved_path": resolved_path,
+        "preview_mode": preview_mode,
+        "source_name": _runtime_dataset_name(source_connection),
+    }
+
+
+def _onelake_candidate_urls(source_connection: Dict[str, Any]) -> List[str]:
+    workspace_id = source_connection.get("workspace_id")
+    artifact_id = source_connection.get("artifact_id")
+    resolved_path = str(source_connection.get("resolved_path") or "").lstrip("/")
+    if not workspace_id or not artifact_id or not resolved_path:
+        return []
+    item_type = str((source_connection.get("connection_metadata") or {}).get("itemType") or "Lakehouse")
+    return [
+        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}/{resolved_path}",
+        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}.{item_type}/{resolved_path}",
+        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}.Lakehouse/{resolved_path}",
+    ]
+
+
+async def _execute_direct_preview_strategy(
+    strategy: str,
+    source_connection: Dict[str, Any],
+    storage_token: Optional[str],
+    db: Session,
+    diagnostics: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    resolved_path = str(source_connection.get("resolved_path") or _runtime_source_path(source_connection) or "")
+    source_name = _runtime_dataset_name(source_connection)
+
+    if strategy in {"direct_csv", "direct_json", "parquet_preview", "direct_file"}:
+        path = _runtime_source_path(source_connection)
+        if path.startswith(("az://", "s3://", "https://")):
+            payload = preview_file(path=path, db=db)
+            payload["preview_mode"] = strategy
+            payload["resolved_path"] = resolved_path or path
+            payload["source_name"] = source_name
+            payload["preview_rows"] = [
+                {column: row[index] if isinstance(row, list) and index < len(row) else None for index, column in enumerate(payload.get("columns") or [])}
+                for row in (payload.get("rows") or [])[:25]
+            ]
+            payload["schema"] = payload.get("schema") or [
+                {"column_name": column, "data_type": "string", "nullable": True, "ordinal_position": index + 1}
+                for index, column in enumerate(payload.get("columns") or [])
+            ]
+            payload["row_count_estimate"] = len(payload.get("preview_rows") or [])
+            return payload
+        if storage_token:
+            for candidate in _onelake_candidate_urls(source_connection):
+                logger.info(
+                    "Runtime preview direct OneLake read | strategy=%s url=%s token_scope=%s token_audience=%s",
+                    strategy,
+                    candidate,
+                    ONELAKE_STORAGE_SCOPE,
+                    _decode_token_audience(storage_token),
+                )
+                diagnostics.append({
+                    "mode": "onelake_direct",
+                    "status": "attempted",
+                    "url": candidate,
+                    "strategy": strategy,
+                    "token_scope": ONELAKE_STORAGE_SCOPE,
+                    "token_audience": _decode_token_audience(storage_token),
+                    "token_source": "backend_client_credentials",
+                })
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.get(candidate, headers={"Authorization": f"Bearer {storage_token}"})
+                    if response.is_success:
+                        payload = _direct_preview_from_bytes(
+                            response.content,
+                            source_connection,
+                            source_connection.get("resolved_path") or candidate,
+                            strategy,
+                        )
+                        payload["source_name"] = source_name
+                        return payload
+                    diagnostics.append({
+                        "mode": "onelake_direct",
+                        "status": "failed",
+                        "url": candidate,
+                        "strategy": strategy,
+                        "http_status": response.status_code,
+                        "response_excerpt": response.text[:200] if response.text else "",
+                        "token_scope": ONELAKE_STORAGE_SCOPE,
+                        "token_audience": _decode_token_audience(storage_token),
+                    })
+                except Exception as exc:
+                    diagnostics.append({
+                        "mode": "onelake_direct",
+                        "status": "failed",
+                        "url": candidate,
+                        "strategy": strategy,
+                        "error": str(exc),
+                        "token_scope": ONELAKE_STORAGE_SCOPE,
+                        "token_audience": _decode_token_audience(storage_token),
+                    })
+        return None
+
+    if strategy == "onelake_direct" and storage_token:
+        for candidate in _onelake_candidate_urls(source_connection):
+            logger.info(
+                "Runtime preview direct OneLake read | strategy=%s url=%s token_scope=%s token_audience=%s",
+                strategy,
+                candidate,
+                ONELAKE_STORAGE_SCOPE,
+                _decode_token_audience(storage_token),
+            )
+            diagnostics.append({
+                "mode": "onelake_direct",
+                "status": "attempted",
+                "url": candidate,
+                "token_scope": ONELAKE_STORAGE_SCOPE,
+                "token_audience": _decode_token_audience(storage_token),
+                "token_source": "backend_client_credentials",
+            })
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.get(candidate, headers={"Authorization": f"Bearer {storage_token}"})
+                if response.is_success:
+                    return _direct_preview_from_bytes(response.content, source_connection, resolved_path or candidate, strategy)
+                diagnostics.append({
+                    "mode": "onelake_direct",
+                    "status": "failed",
+                    "url": candidate,
+                    "http_status": response.status_code,
+                    "response_excerpt": response.text[:200] if response.text else "",
+                    "token_scope": ONELAKE_STORAGE_SCOPE,
+                    "token_audience": _decode_token_audience(storage_token),
+                })
+            except Exception as exc:
+                diagnostics.append({
+                    "mode": "onelake_direct",
+                    "status": "failed",
+                    "url": candidate,
+                    "error": str(exc),
+                    "token_scope": ONELAKE_STORAGE_SCOPE,
+                    "token_audience": _decode_token_audience(storage_token),
+                })
+        return None
+
+    if strategy == "api_preview":
+        metadata = source_connection.get("connection_metadata") or {}
+        endpoint = metadata.get("endpoint") or metadata.get("url")
+        headers = metadata.get("headers") or {}
+        if not endpoint:
+            return None
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(endpoint, headers=headers)
+        if not response.is_success:
+            raise HTTPException(status_code=response.status_code, detail=f"API preview failed: {response.text}")
+        return _direct_preview_from_bytes(response.content, source_connection, endpoint, strategy)
+
+    if strategy == "sql_preview":
+        return None
+
+    if strategy == "delta_preview":
+        return None
+
+    return None
 
 
 def _normalize_preview_source(request: RuntimeSourcePreviewRequest) -> Dict[str, Any]:
@@ -233,9 +522,9 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
     source_path = _runtime_source_path(source_connection)
     diagnostics: List[Dict[str, Any]] = []
     authorization = http_request.headers.get("authorization")
-    bearer_token = None
+    fabric_bearer_token = None
     if authorization and authorization.lower().startswith("bearer "):
-        bearer_token = authorization.split(" ", 1)[1].strip()
+        fabric_bearer_token = authorization.split(" ", 1)[1].strip()
 
     diagnostics.append({
         "mode": "metadata_resolution",
@@ -247,8 +536,80 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
         "file_name": source_connection.get("file_name"),
         "resolved_path": source_connection.get("resolved_path"),
     })
+    strategy = _normalize_preview_strategy(source_connection)
+    source_connection["preview_strategy"] = strategy
+    diagnostics.append({
+        "mode": "strategy_resolution",
+        "status": "success",
+        "preview_strategy": strategy,
+        "source_type": source_connection.get("source_type") or source_connection.get("storage_type"),
+        "connector_type": source_connection.get("connector_type"),
+        "format": source_connection.get("format"),
+    })
 
-    if bearer_token and source_connection.get("workspace_id"):
+    storage_token: Optional[str] = None
+    if strategy in {"direct_csv", "direct_json", "direct_file", "onelake_direct", "parquet_preview"}:
+        try:
+            storage_token = await FabricAuthService().get_storage_token()
+            diagnostics.append({
+                "mode": "auth_resolution",
+                "status": "success",
+                "token_scope": ONELAKE_STORAGE_SCOPE,
+                "token_audience": _decode_token_audience(storage_token),
+                "token_source": "backend_client_credentials",
+            })
+            logger.info(
+                "Runtime preview auth resolved | strategy=%s token_scope=%s token_audience=%s path=%s",
+                strategy,
+                ONELAKE_STORAGE_SCOPE,
+                _decode_token_audience(storage_token),
+                source_connection.get("resolved_path"),
+            )
+        except Exception as exc:
+            diagnostics.append({
+                "mode": "auth_resolution",
+                "status": "failed",
+                "token_scope": ONELAKE_STORAGE_SCOPE,
+                "token_source": "backend_client_credentials",
+                "error": str(exc),
+            })
+            logger.warning(
+                "Runtime preview storage token acquisition failed | strategy=%s path=%s error=%s",
+                strategy,
+                source_connection.get("resolved_path"),
+                exc,
+            )
+
+    try:
+        direct_preview = await _execute_direct_preview_strategy(
+            strategy=strategy,
+            source_connection=source_connection,
+            storage_token=storage_token,
+            db=db,
+            diagnostics=diagnostics,
+        )
+        if direct_preview:
+            direct_preview["diagnostics"] = diagnostics
+            direct_preview["resolved_source"] = direct_preview.get("resolved_source") or source_connection
+            return direct_preview
+    except HTTPException:
+        raise
+    except Exception as exc:
+        diagnostics.append({
+            "mode": "direct_preview",
+            "status": "failed",
+            "preview_strategy": strategy,
+            "error": str(exc),
+        })
+
+    if _is_lightweight_preview_strategy(strategy, source_connection):
+        diagnostics.append({
+            "mode": "spark_notebook",
+            "status": "skipped",
+            "reason": "Spark notebook fallback is disabled for lightweight runtime previews.",
+            "preview_strategy": strategy,
+        })
+    elif fabric_bearer_token and source_connection.get("workspace_id"):
         diagnostics.append({
             "mode": "spark_notebook",
             "status": "attempted",
@@ -275,7 +636,7 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
                 "resolved_source": resolved_source,
                 "runtime_statistics": {},
             }
-            preview_service = FabricUniversalPreviewService(bearer_token)
+            preview_service = FabricUniversalPreviewService(fabric_bearer_token)
             notebook_preview = await preview_service.execute_preview(
                 workspace_id=source_connection.get("workspace_id"),
                 preview_request=universal_request,
@@ -321,7 +682,7 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
         diagnostics.append({
             "mode": "spark_notebook",
             "status": "skipped",
-            "reason": "Fabric bearer token or workspace id was not provided for notebook execution.",
+            "reason": "Notebook preview requires a Fabric bearer token and workspace id, and is enabled only for non-lightweight preview strategies.",
         })
 
     if source_path.startswith(("az://", "s3://", "https://")):

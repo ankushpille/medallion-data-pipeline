@@ -3,6 +3,8 @@ import os
 from fastapi import HTTPException
 
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
+FABRIC_API_SCOPE = "https://api.fabric.microsoft.com/.default"
+ONELAKE_STORAGE_SCOPE = "https://storage.azure.com/.default"
 
 class FabricAuthService:
     def __init__(self, tenant_id=None, client_id=None, client_secret=None):
@@ -10,20 +12,36 @@ class FabricAuthService:
         self.client_id = client_id or os.getenv("AZURE_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("AZURE_CLIENT_SECRET")
 
-    async def get_client_token(self):
-        """Get token using Client Credentials Flow"""
+    async def get_client_token_for_scope(self, scope: str):
+        """Get token using Client Credentials Flow for a specific resource scope."""
+        if not self.tenant_id or not self.client_id or not self.client_secret:
+            raise HTTPException(
+                status_code=500,
+                detail="Azure client credentials are not fully configured for backend token acquisition.",
+            )
         url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
         data = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "grant_type": "client_credentials",
-            "scope": "https://api.fabric.microsoft.com/.default"
+            "scope": scope,
         }
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, data=data)
             if resp.status_code != 200:
-                raise HTTPException(status_code=resp.status_code, detail=f"Failed to get token: {resp.text}")
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"Failed to get token for scope {scope}: {resp.text}",
+                )
             return resp.json().get("access_token")
+
+    async def get_client_token(self):
+        """Get Fabric API token using Client Credentials Flow."""
+        return await self.get_client_token_for_scope(FABRIC_API_SCOPE)
+
+    async def get_storage_token(self):
+        """Get OneLake DFS token using the Azure Storage resource scope."""
+        return await self.get_client_token_for_scope(ONELAKE_STORAGE_SCOPE)
 
     def get_auth_url(self, redirect_uri):
         """Get URL for Interactive SSO login"""
